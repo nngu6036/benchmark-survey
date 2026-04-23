@@ -476,7 +476,7 @@ class ConStructWrapper(BaseGenerator):
         original_load = torch.load
 
         def compat_load(*args, **kwargs):
-            kwargs.setdefault("weights_only", False)
+            kwargs["weights_only"] = False
             return original_load(*args, **kwargs)
 
         torch.load = compat_load

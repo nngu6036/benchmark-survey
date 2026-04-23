@@ -397,8 +397,7 @@ class ConStructWrapper(BaseGenerator):
             )
         self.model.eval()
         self.model.to(self.device)
-        # Minimal trainer stub so sampling utilities that query trainer fields work.
-        self.model._trainer = SimpleNamespace(num_devices=1, strategy=SimpleNamespace(barrier=lambda: None))
+        self._bootstrap_sampling_runtime()
 
     def train(
         self,
@@ -417,7 +416,7 @@ class ConStructWrapper(BaseGenerator):
         trainer.save_checkpoint(str(self.checkpoint_path))
         self.model.eval()
         self.model.to(self.device)
-        self.model._trainer = SimpleNamespace(num_devices=1, strategy=SimpleNamespace(barrier=lambda: None))
+        self._bootstrap_sampling_runtime()
 
     def sample(self, num_graphs: int, seed: int = 0) -> list[nx.Graph]:
         if self.model is None:
@@ -426,9 +425,7 @@ class ConStructWrapper(BaseGenerator):
         pl.seed_everything(seed)
         self.model.eval()
         self.model.to(self.device)
-        # Ensure a trainer-like object exists for helper methods.
-        if getattr(self.model, "_trainer", None) is None:
-            self.model._trainer = SimpleNamespace(num_devices=1, strategy=SimpleNamespace(barrier=lambda: None))
+        self._bootstrap_sampling_runtime()
 
         with torch.no_grad():
             batches = self.model.sample_n_graphs(
@@ -470,6 +467,19 @@ class ConStructWrapper(BaseGenerator):
                         g.add_edge(u, v, edge_type=edge_type)
             graphs.append(g)
         return graphs
+
+    def _bootstrap_sampling_runtime(self) -> None:
+        if self.model is None:
+            return
+        if getattr(self.model, "_trainer", None) is None:
+            self.model._trainer = SimpleNamespace(
+                num_devices=1,
+                strategy=SimpleNamespace(barrier=lambda: None),
+            )
+        if not hasattr(self.model, "local_rank"):
+            self.model.local_rank = 0
+        if not hasattr(self.model, "global_rank"):
+            self.model.global_rank = 0
 
     @contextlib.contextmanager
     def _legacy_torch_load(self):

@@ -197,8 +197,6 @@ class ConStructWrapper(BaseGenerator):
         cfg.train = train
         cfg.model = model
         cfg.dataset = dataset
-        if "hydra" in base:
-            cfg.hydra = base.hydra
 
         cfg.general.name = str(
             self.config.get("experiment_name", f"construct_{self.dataset_name}")

@@ -262,7 +262,7 @@ class EDPGNNWrapper(BaseGenerator):
 
         get_score_model = self.mods["loading_utils"].get_score_model
         get_mc_sampler = self.mods["loading_utils"].get_mc_sampler
-        with self._legacy_torch_load():
+        with self._legacy_torch_load(), self._legacy_networkx_matrix():
             self.model = get_score_model(self.edp_config, dev=self.device)
         self.model.load_state_dict(ckpt["model_state"], strict=False)
         self.model.to(self.device)
@@ -286,7 +286,7 @@ class EDPGNNWrapper(BaseGenerator):
             comment = "empirical_comparison"
             log_level = "INFO"
 
-        with self._repo_cwd():
+        with self._repo_cwd(), self._legacy_networkx_matrix():
             set_seed_and_logger(self.edp_config, _Args())
             random.seed(self.edp_config.seed)
             np.random.seed(self.edp_config.seed)
@@ -460,3 +460,27 @@ class EDPGNNWrapper(BaseGenerator):
             yield
         finally:
             os.chdir(old_cwd)
+
+    @contextlib.contextmanager
+    def _legacy_networkx_matrix(self):
+        if hasattr(nx, "to_numpy_matrix"):
+            yield
+            return
+
+        def compat_to_numpy_matrix(g, nodelist=None, dtype=None, order=None, multigraph_weight=sum, weight="weight", nonedge=0.0):
+            arr = nx.to_numpy_array(
+                g,
+                nodelist=nodelist,
+                dtype=dtype,
+                order=order,
+                multigraph_weight=multigraph_weight,
+                weight=weight,
+                nonedge=nonedge,
+            )
+            return np.asmatrix(arr)
+
+        nx.to_numpy_matrix = compat_to_numpy_matrix
+        try:
+            yield
+        finally:
+            delattr(nx, "to_numpy_matrix")

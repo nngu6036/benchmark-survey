@@ -286,37 +286,38 @@ class EDPGNNWrapper(BaseGenerator):
             comment = "empirical_comparison"
             log_level = "INFO"
 
-        set_seed_and_logger(self.edp_config, _Args())
-        random.seed(self.edp_config.seed)
-        np.random.seed(self.edp_config.seed)
-        torch.manual_seed(self.edp_config.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(self.edp_config.seed)
+        with self._repo_cwd():
+            set_seed_and_logger(self.edp_config, _Args())
+            random.seed(self.edp_config.seed)
+            np.random.seed(self.edp_config.seed)
+            torch.manual_seed(self.edp_config.seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(self.edp_config.seed)
 
-        train_dl, test_dl = load_data(self.edp_config)
-        self.mcmc_sampler = get_mc_sampler(self.edp_config)
-        self.model = get_score_model(self.edp_config, dev=self.device)
-        optimizer = torch.optim.Adam(
-            self.model.parameters(),
-            lr=float(self.edp_config.train.lr_init),
-            betas=(0.9, 0.999),
-            eps=1e-8,
-            weight_decay=float(self.edp_config.train.weight_decay),
-        )
-        fit(
-            self.model,
-            optimizer,
-            self.mcmc_sampler,
-            train_dl,
-            max_node_number=int(self.edp_config.dataset.max_node_num),
-            max_epoch=int(self.edp_config.train.max_epoch),
-            config=self.edp_config,
-            save_interval=int(self.edp_config.train.save_interval),
-            sample_interval=int(self.edp_config.train.sample_interval),
-            sigma_list=list(self.edp_config.train.sigmas),
-            sample_from_sigma_delta=0.0,
-            test_dl=test_dl,
-        )
+            train_dl, test_dl = load_data(self.edp_config)
+            self.mcmc_sampler = get_mc_sampler(self.edp_config)
+            self.model = get_score_model(self.edp_config, dev=self.device)
+            optimizer = torch.optim.Adam(
+                self.model.parameters(),
+                lr=float(self.edp_config.train.lr_init),
+                betas=(0.9, 0.999),
+                eps=1e-8,
+                weight_decay=float(self.edp_config.train.weight_decay),
+            )
+            fit(
+                self.model,
+                optimizer,
+                self.mcmc_sampler,
+                train_dl,
+                max_node_number=int(self.edp_config.dataset.max_node_num),
+                max_epoch=int(self.edp_config.train.max_epoch),
+                config=self.edp_config,
+                save_interval=int(self.edp_config.train.save_interval),
+                sample_interval=int(self.edp_config.train.sample_interval),
+                sigma_list=list(self.edp_config.train.sigmas),
+                sample_from_sigma_delta=0.0,
+                test_dl=test_dl,
+            )
 
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -450,3 +451,12 @@ class EDPGNNWrapper(BaseGenerator):
             yield
         finally:
             torch.load = original_load
+
+    @contextlib.contextmanager
+    def _repo_cwd(self):
+        old_cwd = Path.cwd()
+        os.chdir(self.repo_root)
+        try:
+            yield
+        finally:
+            os.chdir(old_cwd)

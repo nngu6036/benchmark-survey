@@ -229,7 +229,7 @@ class GraphGUIDEWrapper(BaseGenerator):
         loader = self._make_loader(train_graphs, shuffle=True)
         self.template_graphs = [g.copy() for g in train_graphs]
 
-        num_epochs = int(self.config.get("num_epochs", 30))
+        num_epochs = int(self.config.get("num_epochs", 100))
         learning_rate = float(self.config.get("learning_rate", 1e-3))
         t_limit = int(self.config.get("t_limit", 100))
         optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)

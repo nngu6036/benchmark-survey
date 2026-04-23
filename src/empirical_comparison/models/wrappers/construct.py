@@ -474,12 +474,19 @@ class ConStructWrapper(BaseGenerator):
         if getattr(self.model, "_trainer", None) is None:
             self.model._trainer = SimpleNamespace(
                 num_devices=1,
+                local_rank=0,
+                global_rank=0,
                 strategy=SimpleNamespace(barrier=lambda: None),
             )
-        if not hasattr(self.model, "local_rank"):
-            self.model.local_rank = 0
-        if not hasattr(self.model, "global_rank"):
-            self.model.global_rank = 0
+        else:
+            if not hasattr(self.model._trainer, "num_devices"):
+                self.model._trainer.num_devices = 1
+            if not hasattr(self.model._trainer, "local_rank"):
+                self.model._trainer.local_rank = 0
+            if not hasattr(self.model._trainer, "global_rank"):
+                self.model._trainer.global_rank = 0
+            if not hasattr(self.model._trainer, "strategy"):
+                self.model._trainer.strategy = SimpleNamespace(barrier=lambda: None)
 
     @contextlib.contextmanager
     def _legacy_torch_load(self):

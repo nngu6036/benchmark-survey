@@ -465,7 +465,11 @@ class EDPGNNWrapper(BaseGenerator):
 
     @contextlib.contextmanager
     def _legacy_networkx_matrix(self):
-        if hasattr(nx, "to_numpy_matrix") and hasattr(nx, "from_numpy_matrix"):
+        if (
+            hasattr(nx, "to_numpy_matrix")
+            and hasattr(nx, "from_numpy_matrix")
+            and hasattr(nx.Graph, "selfloop_edges")
+        ):
             yield
             return
 
@@ -491,10 +495,15 @@ class EDPGNNWrapper(BaseGenerator):
 
         added_to = not hasattr(nx, "to_numpy_matrix")
         added_from = not hasattr(nx, "from_numpy_matrix")
+        added_selfloop_edges = not hasattr(nx.Graph, "selfloop_edges")
         if added_to:
             nx.to_numpy_matrix = compat_to_numpy_matrix
         if added_from:
             nx.from_numpy_matrix = compat_from_numpy_matrix
+        if added_selfloop_edges:
+            nx.Graph.selfloop_edges = lambda self, data=False, keys=False, default=None: list(
+                nx.selfloop_edges(self, data=data)
+            )
         try:
             yield
         finally:
@@ -502,3 +511,5 @@ class EDPGNNWrapper(BaseGenerator):
                 delattr(nx, "to_numpy_matrix")
             if added_from:
                 delattr(nx, "from_numpy_matrix")
+            if added_selfloop_edges:
+                delattr(nx.Graph, "selfloop_edges")

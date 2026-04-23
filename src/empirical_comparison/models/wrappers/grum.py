@@ -213,15 +213,43 @@ class GruMWrapper:
         if not self.project_root.exists():
             raise FileNotFoundError(f"GruM_2D not found under repo_root: {self.project_root}")
         with _prepend_sys_path(self.project_root), _pushd(self.project_root):
+            node_features_mod = importlib.import_module("utils.node_features")
             trainer_mod = importlib.import_module("trainer")
             loader_mod = importlib.import_module("utils.loader")
             graph_utils_mod = importlib.import_module("utils.graph_utils")
+        self._patch_node_features(node_features_mod)
         self._modules = _LoadedModules(
             trainer_mod=trainer_mod,
             loader_mod=loader_mod,
             graph_utils_mod=graph_utils_mod,
         )
         return self._modules
+
+    def _patch_node_features(self, node_features_mod: Any) -> None:
+        if getattr(node_features_mod, "_empirical_eigen_patch", False):
+            return
+        original = node_features_mod.get_eigenvalues_features
+
+        def safe_get_eigenvalues_features(eigenvalues, k=5):
+            ev = eigenvalues
+            bs, n = ev.shape
+            n_connected_components = (ev < 1e-5).sum(dim=-1)
+            n_connected_components = torch.clamp(n_connected_components, min=1)
+
+            to_extend = int(torch.max(n_connected_components).item()) + k - n
+            if to_extend > 0:
+                eigenvalues = torch.hstack(
+                    (eigenvalues, 2 * torch.ones(bs, to_extend).type_as(eigenvalues))
+                )
+            indices = (
+                torch.arange(k).type_as(eigenvalues).long().unsqueeze(0)
+                + n_connected_components.unsqueeze(1)
+            )
+            first_k_ev = torch.gather(eigenvalues, dim=1, index=indices)
+            return n_connected_components.unsqueeze(-1), first_k_ev
+
+        node_features_mod.get_eigenvalues_features = safe_get_eigenvalues_features
+        node_features_mod._empirical_eigen_patch = True
 
     def _build_config(self, train_graphs: Sequence[nx.Graph]):
         cfg_path = self.project_root / "config" / f"{self.base_config_name}.yaml"

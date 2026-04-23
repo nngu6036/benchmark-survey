@@ -1,0 +1,6 @@
+name: graphguide
+checkpoint_path: checkpoints/graphguide.pt
+batch_size: 32
+sampling:
+  num_steps: 100
+  temperature: 1.0

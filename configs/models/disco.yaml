@@ -1,0 +1,6 @@
+name: disco
+checkpoint_path: checkpoints/disco.pt
+batch_size: 32
+sampling:
+  num_steps: 100
+  temperature: 1.0

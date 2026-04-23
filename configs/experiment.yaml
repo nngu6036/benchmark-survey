@@ -1,0 +1,33 @@
+seed: 42
+num_runs: 3
+num_generated_graphs: 1024
+num_reference_graphs: 1024
+
+datasets:
+  - sbm
+  - planar
+
+models:
+  - graphguide
+  - digress
+  - construct
+  - edp_gnn
+  - disco
+  - grum
+
+metrics:
+  descriptor:
+    enabled: true
+    descriptors: [degree, clustering, orbit, spectral]
+    discrepancy: mmd
+    bootstrap_rounds: 20
+  learned_feature:
+    enabled: true
+    encoder: random_gin
+    discrepancy: mmd
+    bootstrap_rounds: 20
+  classifier:
+    enabled: true
+    classifier: logistic_regression_placeholder
+    score: classifier_separation
+    bootstrap_rounds: 20

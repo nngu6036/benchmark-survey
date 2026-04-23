@@ -1,0 +1,3 @@
+classifier: logistic_regression_placeholder
+score: classifier_separation
+train_test_split: 0.5

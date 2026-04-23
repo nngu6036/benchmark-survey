@@ -1,0 +1,7 @@
+name: digress
+repo_root: E:\git\ANU\benchmark-survey\external\DiGress
+checkpoint_path: checkpoints/digress.pt
+batch_size: 32
+sampling:
+  num_steps: 100
+  temperature: 1.0

@@ -1,0 +1,10 @@
+name: sbm
+num_graphs: 1024
+num_nodes: 64
+num_blocks: 4
+p_in: 0.25
+p_out: 0.02
+split:
+  train: 0.8
+  val: 0.1
+  test: 0.1

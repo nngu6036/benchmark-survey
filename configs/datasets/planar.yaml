@@ -1,0 +1,7 @@
+name: planar
+num_graphs: 1024
+num_nodes: 64
+split:
+  train: 0.8
+  val: 0.1
+  test: 0.1

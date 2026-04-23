@@ -1,0 +1,12 @@
+numpy>=1.24
+pandas>=2.0
+pyyaml>=6.0
+networkx>=3.2
+scipy>=1.11
+tqdm>=4.66
+torch>=2.0
+torch-geometric>=2.5
+omegaconf>=2.3
+pytorch-lightning>=2.0
+easydict>=1.10
+pytest>=8.0

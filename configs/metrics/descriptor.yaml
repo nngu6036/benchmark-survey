@@ -1,0 +1,6 @@
+descriptors:
+  - degree
+  - clustering
+  - orbit
+  - spectral
+discrepancy: mmd

@@ -1,0 +1,3 @@
+encoder: random_gin
+discrepancy: mmd
+feature_dim: 128

@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "empirical-comparison"
+version = "0.1.0"
+description = "Starter scaffold for empirical comparison of time-dependent graph generative models"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "OpenAI Starter Scaffold"}]
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "pyyaml>=6.0",
+  "networkx>=3.2",
+  "scipy>=1.11",
+  "tqdm>=4.66"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+prepare-data = "empirical_comparison.cli:prepare_data_main"
+train-model = "empirical_comparison.cli:train_model_main"
+generate-samples = "empirical_comparison.cli:generate_samples_main"
+eval-descriptor = "empirical_comparison.cli:evaluate_descriptor_main"
+eval-learned = "empirical_comparison.cli:evaluate_learned_main"
+eval-classifier = "empirical_comparison.cli:evaluate_classifier_main"
+aggregate-results = "empirical_comparison.cli:aggregate_results_main"
+make-latex-tables = "empirical_comparison.cli:make_latex_tables_main"
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

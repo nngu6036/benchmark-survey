@@ -476,6 +476,7 @@ class ConStructWrapper(BaseGenerator):
                 num_devices=1,
                 local_rank=0,
                 global_rank=0,
+                current_epoch=0,
                 strategy=SimpleNamespace(barrier=lambda: None),
             )
         else:
@@ -485,10 +486,10 @@ class ConStructWrapper(BaseGenerator):
                 self.model._trainer.local_rank = 0
             if not hasattr(self.model._trainer, "global_rank"):
                 self.model._trainer.global_rank = 0
+            if not hasattr(self.model._trainer, "current_epoch"):
+                self.model._trainer.current_epoch = 0
             if not hasattr(self.model._trainer, "strategy"):
                 self.model._trainer.strategy = SimpleNamespace(barrier=lambda: None)
-        if "current_epoch" not in self.model.__dict__:
-            self.model.__dict__["current_epoch"] = 0
 
     @contextlib.contextmanager
     def _legacy_torch_load(self):

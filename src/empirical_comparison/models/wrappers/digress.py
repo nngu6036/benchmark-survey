@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib
 import json
 import os
@@ -258,8 +259,9 @@ class DiGressWrapper(BaseGenerator):
         DummyExtraFeatures = self._imports["extra_features"].DummyExtraFeatures
         DiscreteDenoisingDiffusion = self._imports["diffusion_model_discrete"].DiscreteDenoisingDiffusion
 
-        datamodule = SpectreGraphDataModule(self.cfg)
-        dataset_infos = SpectreDatasetInfos(datamodule, self.cfg.dataset)
+        with self._legacy_torch_load():
+            datamodule = SpectreGraphDataModule(self.cfg)
+            dataset_infos = SpectreDatasetInfos(datamodule, self.cfg.dataset)
         train_metrics = TrainAbstractMetricsDiscrete()
         if self.cfg.model.extra_features is not None:
             extra_features = ExtraFeatures(self.cfg.model.extra_features, dataset_info=dataset_infos)
@@ -314,6 +316,22 @@ class DiGressWrapper(BaseGenerator):
             model._hparams = {}
         if hasattr(model, "_hparams_initial"):
             model._hparams_initial = {}
+
+    @contextlib.contextmanager
+    def _legacy_torch_load(self):
+        # PyTorch 2.6 changed torch.load(..., weights_only=...) to default to
+        # True. Upstream DiGress dataset code relies on full object unpickling.
+        original_load = torch.load
+
+        def compat_load(*args, **kwargs):
+            kwargs.setdefault("weights_only", False)
+            return original_load(*args, **kwargs)
+
+        torch.load = compat_load
+        try:
+            yield
+        finally:
+            torch.load = original_load
 
     def _make_trainer(self) -> Trainer:
         use_gpu = self.cfg.general.gpus > 0 and torch.cuda.is_available()

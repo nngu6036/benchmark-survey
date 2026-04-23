@@ -42,8 +42,9 @@ class DiGressWrapper(BaseGenerator):
 
     Expected config keys
     --------------------
-    repo_root: str
-        Path to the extracted DiGress repository root.
+    repo_root: str, optional
+        Path to the extracted DiGress repository root. If omitted, the
+        ``DIGRESS_REPO`` environment variable is used.
     checkpoint_path: str
         Where to save/load the Lightning checkpoint.
     dataset_name: str
@@ -77,7 +78,10 @@ class DiGressWrapper(BaseGenerator):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self.repo_root = Path(config["repo_root"]).expanduser().resolve()
+        repo_root = os.environ.get("DIGRESS_REPO") or config.get("repo_root")
+        if not repo_root:
+            raise ValueError("DiGressWrapper requires `repo_root` or the DIGRESS_REPO environment variable.")
+        self.repo_root = Path(repo_root).expanduser().resolve()
         self.repo_src = self.repo_root / "src"
         self.device = config.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
         self.checkpoint_path = Path(config["checkpoint_path"]).expanduser().resolve()

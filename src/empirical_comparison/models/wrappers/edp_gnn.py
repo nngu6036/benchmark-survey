@@ -6,6 +6,7 @@ import logging
 import pickle
 import random
 import shutil
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -66,7 +67,10 @@ class EDPGNNWrapper(BaseGenerator):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self.repo_root = Path(config["repo_root"]).expanduser().resolve()
+        repo_root = os.environ.get("EDP_GNN_REPO") or config.get("repo_root")
+        if not repo_root:
+            raise ValueError("EDPGNNWrapper requires `repo_root` or the EDP_GNN_REPO environment variable.")
+        self.repo_root = Path(repo_root).expanduser().resolve()
         self.checkpoint_path = Path(config["checkpoint_path"]).expanduser().resolve()
         self.device = torch.device(config.get("device") or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.dataset_name = str(config.get("dataset_name", "empirical_graphs"))

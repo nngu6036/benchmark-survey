@@ -185,6 +185,7 @@ class GraphGUIDEWrapper(BaseGenerator):
     def load(self) -> None:
         """Load a trained GraphGUIDE model from checkpoint_path."""
         self._import_graphguide_modules()
+        ckpt = None
 
         if self.input_dim is None:
             input_dim = self.config.get("input_dim")
@@ -201,9 +202,18 @@ class GraphGUIDEWrapper(BaseGenerator):
         model_type = str(self.config.get("model_type", "gat")).lower()
         cls = self.gg_gnn.GraphLinkGAT if model_type == "gat" else self.gg_gnn.GraphLinkGIN
         with self._legacy_torch_load():
-            self.model = self.gg_model_util.load_model(cls, str(self.checkpoint_path)).to(self.device)
+            if ckpt is None:
+                ckpt = torch.load(self.checkpoint_path, map_location=self.device)
+            if "model_state" in ckpt and "model_creation_args" in ckpt:
+                self.model = cls(**ckpt["model_creation_args"]).to(self.device)
+                self.model.load_state_dict(ckpt["model_state"])
+            else:
+                self.model = self.gg_model_util.load_model(cls, str(self.checkpoint_path)).to(self.device)
         self.model.eval()
         self.diffuser = self._build_diffuser()
+        template_graphs = ckpt.get("template_graphs") if isinstance(ckpt, dict) else None
+        if template_graphs:
+            self.template_graphs = [self._restore_graph(g) for g in template_graphs]
 
     @contextlib.contextmanager
     def _legacy_torch_load(self):
@@ -276,7 +286,14 @@ class GraphGUIDEWrapper(BaseGenerator):
             print(f"[GraphGUIDE] epoch {epoch + 1}/{num_epochs} loss={mean_loss:.4f}")
 
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        self.gg_model_util.save_model(self.model, str(self.checkpoint_path))
+        torch.save(
+            {
+                "model_state": self.model.state_dict(),
+                "model_creation_args": self.model.creation_args,
+                "template_graphs": [self._serialize_graph(g) for g in self.template_graphs],
+            },
+            self.checkpoint_path,
+        )
         self.model.eval()
 
     def _prepare_initial_sample(self, template_graphs: list[nx.Graph]):
@@ -327,3 +344,22 @@ class GraphGUIDEWrapper(BaseGenerator):
             verbose=False,
         )
         return self.gg_graph_conversions.split_pyg_data_to_nx_graphs(samples)
+
+    def _serialize_graph(self, g: nx.Graph) -> dict[str, Any]:
+        g2 = nx.convert_node_labels_to_integers(g)
+        feats = []
+        feat_map = nx.get_node_attributes(g2, "feats")
+        for i in range(g2.number_of_nodes()):
+            arr = np.asarray(feat_map.get(i, np.ones(1, dtype=np.float32)), dtype=np.float32)
+            if arr.ndim == 0:
+                arr = arr[None]
+            feats.append(arr.tolist())
+        return {"edges": list(g2.edges()), "num_nodes": g2.number_of_nodes(), "features": feats}
+
+    def _restore_graph(self, data: dict[str, Any]) -> nx.Graph:
+        g = nx.Graph()
+        g.add_nodes_from(range(int(data["num_nodes"])))
+        g.add_edges_from([tuple(map(int, e)) for e in data["edges"]])
+        for i, feat in enumerate(data["features"]):
+            g.nodes[i]["feats"] = np.asarray(feat, dtype=np.float32)
+        return g

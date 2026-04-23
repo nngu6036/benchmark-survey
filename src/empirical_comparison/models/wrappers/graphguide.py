@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import random
 import sys
 from pathlib import Path
@@ -56,7 +57,11 @@ class GraphGUIDEWrapper(BaseGenerator):
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
         self.device = config.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.repo_root = Path(config["repo_root"]).expanduser().resolve()
+        default_repo_root = Path(__file__).resolve().parents[4] / "external" / "GraphGUIDE"
+        repo_root = os.environ.get("GRAPHGUIDE_REPO") or config.get("repo_root") or default_repo_root
+        if not repo_root:
+            raise ValueError("GraphGUIDEWrapper requires `repo_root` or the GRAPHGUIDE_REPO environment variable.")
+        self.repo_root = self._normalize_repo_root(Path(repo_root).expanduser().resolve())
         self.repo_src = self.repo_root / "src"
         self.checkpoint_path = Path(config["checkpoint_path"]).expanduser().resolve()
 
@@ -76,6 +81,11 @@ class GraphGUIDEWrapper(BaseGenerator):
     def name(self) -> str:
         return "graphguide"
 
+    def _normalize_repo_root(self, repo_root: Path) -> Path:
+        if repo_root.name == "src" and (repo_root / "model").exists():
+            repo_root = repo_root.parent
+        return repo_root
+
     def _ensure_repo_importable(self) -> None:
         if str(self.repo_src) not in sys.path:
             sys.path.insert(0, str(self.repo_src))
@@ -84,6 +94,8 @@ class GraphGUIDEWrapper(BaseGenerator):
         if self.gg_loaded:
             return
         self._ensure_repo_importable()
+        if not self.repo_src.exists():
+            raise FileNotFoundError(f"GraphGUIDE src directory not found under repo_root={self.repo_root}")
         self.gg_model_util = importlib.import_module("model.util")
         self.gg_graph_conversions = importlib.import_module("feature.graph_conversions")
         self.gg_generate = importlib.import_module("model.generate")

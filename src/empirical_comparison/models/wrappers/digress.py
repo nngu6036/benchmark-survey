@@ -78,10 +78,11 @@ class DiGressWrapper(BaseGenerator):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        repo_root = os.environ.get("DIGRESS_REPO") or config.get("repo_root")
+        default_repo_root = Path(__file__).resolve().parents[4] / "external" / "DiGress"
+        repo_root = os.environ.get("DIGRESS_REPO") or config.get("repo_root") or default_repo_root
         if not repo_root:
             raise ValueError("DiGressWrapper requires `repo_root` or the DIGRESS_REPO environment variable.")
-        self.repo_root = Path(repo_root).expanduser().resolve()
+        self.repo_root = self._normalize_repo_root(Path(repo_root).expanduser().resolve())
         self.repo_src = self.repo_root / "src"
         self.device = config.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
         self.checkpoint_path = Path(config["checkpoint_path"]).expanduser().resolve()
@@ -109,6 +110,11 @@ class DiGressWrapper(BaseGenerator):
     # ---------------------------------------------------------------------
     # Repository loading and config construction
     # ---------------------------------------------------------------------
+    def _normalize_repo_root(self, repo_root: Path) -> Path:
+        if repo_root.name == "src" and (repo_root / "utils.py").exists():
+            repo_root = repo_root.parent
+        return repo_root
+
     def _ensure_repo_importable(self) -> None:
         for p in (str(self.repo_root), str(self.repo_src)):
             if p not in sys.path:
@@ -118,6 +124,8 @@ class DiGressWrapper(BaseGenerator):
         if self.repo_loaded:
             return
         self._ensure_repo_importable()
+        if not self.repo_src.exists():
+            raise FileNotFoundError(f"DiGress src directory not found under repo_root={self.repo_root}")
         self._imports["utils"] = importlib.import_module("src.utils")
         self._imports["datasets_spectre"] = importlib.import_module("src.datasets.spectre_dataset")
         self._imports["metrics_abstract"] = importlib.import_module("src.metrics.abstract_metrics")
@@ -138,10 +146,6 @@ class DiGressWrapper(BaseGenerator):
         cfg.model = model
         cfg.train = train
         cfg.dataset = dataset
-
-        # Keep a copy of the Hydra run config only for completeness.
-        if "hydra" in base:
-            cfg.hydra = base.hydra
 
         cfg.general.name = str(self.config.get("experiment_name", f"digress_{self.dataset_name}"))
         cfg.general.wandb = "disabled"
@@ -279,6 +283,7 @@ class DiGressWrapper(BaseGenerator):
             extra_features=extra_features,
             domain_features=domain_features,
         )
+        self._clear_lightning_hparams(model)
 
         self.datamodule = datamodule
         self.dataset_infos = dataset_infos
@@ -301,6 +306,14 @@ class DiGressWrapper(BaseGenerator):
                 stacklevel=2,
             )
             return _NoOpSamplingMetrics(reason=str(exc))
+
+    def _clear_lightning_hparams(self, model: torch.nn.Module) -> None:
+        # Upstream DiGress stores the full Hydra/OmegaConf config in Lightning
+        # hyperparameters, which can trigger a large pickle during Trainer.fit().
+        if hasattr(model, "_hparams"):
+            model._hparams = {}
+        if hasattr(model, "_hparams_initial"):
+            model._hparams_initial = {}
 
     def _make_trainer(self) -> Trainer:
         use_gpu = self.cfg.general.gpus > 0 and torch.cuda.is_available()

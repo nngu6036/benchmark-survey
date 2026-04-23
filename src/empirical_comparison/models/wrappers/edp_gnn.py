@@ -67,10 +67,11 @@ class EDPGNNWrapper(BaseGenerator):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        repo_root = os.environ.get("EDP_GNN_REPO") or config.get("repo_root")
+        default_repo_root = Path(__file__).resolve().parents[4] / "external" / "EDP-GNN"
+        repo_root = os.environ.get("EDP_GNN_REPO") or config.get("repo_root") or default_repo_root
         if not repo_root:
             raise ValueError("EDPGNNWrapper requires `repo_root` or the EDP_GNN_REPO environment variable.")
-        self.repo_root = Path(repo_root).expanduser().resolve()
+        self.repo_root = self._normalize_repo_root(Path(repo_root).expanduser().resolve())
         self.checkpoint_path = Path(config["checkpoint_path"]).expanduser().resolve()
         self.device = torch.device(config.get("device") or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.dataset_name = str(config.get("dataset_name", "empirical_graphs"))
@@ -89,6 +90,11 @@ class EDPGNNWrapper(BaseGenerator):
     # ------------------------------------------------------------------
     # Repo imports
     # ------------------------------------------------------------------
+    def _normalize_repo_root(self, repo_root: Path) -> Path:
+        if repo_root.name == "utils" and (repo_root.parent / "train.py").exists():
+            repo_root = repo_root.parent
+        return repo_root
+
     def _ensure_repo_importable(self) -> None:
         root_str = str(self.repo_root)
         if root_str not in sys.path:
@@ -98,6 +104,8 @@ class EDPGNNWrapper(BaseGenerator):
         if self.repo_loaded:
             return
         self._ensure_repo_importable()
+        if not (self.repo_root / "train.py").exists():
+            raise FileNotFoundError(f"EDP-GNN repository layout not found under repo_root={self.repo_root}")
         self.mods["train"] = importlib.import_module("train")
         self.mods["arg_helper"] = importlib.import_module("utils.arg_helper")
         self.mods["loading_utils"] = importlib.import_module("utils.loading_utils")

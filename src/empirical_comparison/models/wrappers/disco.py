@@ -72,10 +72,11 @@ class DisCoWrapper(BaseGenerator):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        repo_root = os.environ.get("DISCO_REPO") or config.get("repo_root")
+        default_repo_root = Path(__file__).resolve().parents[4] / "external" / "DisCo"
+        repo_root = os.environ.get("DISCO_REPO") or config.get("repo_root") or default_repo_root
         if not repo_root:
             raise ValueError("DisCoWrapper requires `repo_root` or the DISCO_REPO environment variable.")
-        self.repo_root = Path(repo_root).expanduser().resolve()
+        self.repo_root = self._normalize_repo_root(Path(repo_root).expanduser().resolve())
         self.device = torch.device(config.get("device") or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.checkpoint_path = Path(config["checkpoint_path"]).expanduser().resolve()
         self.dataset_name = str(config.get("dataset_name", "sbm")).lower()
@@ -109,6 +110,11 @@ class DisCoWrapper(BaseGenerator):
     # ------------------------------------------------------------------
     # Repo imports
     # ------------------------------------------------------------------
+    def _normalize_repo_root(self, repo_root: Path) -> Path:
+        if repo_root.name == "loader" and (repo_root.parent / "dataset_info.py").exists():
+            repo_root = repo_root.parent
+        return repo_root
+
     def _ensure_repo_importable(self) -> None:
         root_str = str(self.repo_root)
         if root_str not in sys.path:
@@ -118,6 +124,8 @@ class DisCoWrapper(BaseGenerator):
         if self.repo_loaded:
             return
         self._ensure_repo_importable()
+        if not (self.repo_root / "loader").exists():
+            raise FileNotFoundError(f"DisCo repository layout not found under repo_root={self.repo_root}")
         self.mods["load_spectre"] = importlib.import_module("loader.load_spectre_data")
         self.mods["dataset_info"] = importlib.import_module("dataset_info")
         self.mods["forward_diff"] = importlib.import_module("forward_diff")

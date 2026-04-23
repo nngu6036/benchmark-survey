@@ -95,9 +95,10 @@ class GruMWrapper:
         return "grum"
 
     def load(self) -> None:
-        ckpt = torch.load(self.checkpoint_path, map_location=self._device_id())
+        with self._legacy_torch_load():
+            ckpt = torch.load(self.checkpoint_path, map_location=self._device_id())
         mods = self._import_modules()
-        with _pushd(self.project_root), _prepend_sys_path(self.project_root):
+        with self._legacy_torch_load(), _pushd(self.project_root), _prepend_sys_path(self.project_root):
             model = mods.loader_mod.load_model_from_ckpt(ckpt["params"], ckpt["state_dict"], self._device())
             ema = None
             if "ema" in ckpt:
@@ -386,3 +387,17 @@ class GruMWrapper:
     def _device0(self):
         device = self._device()
         return f"cuda:{device[0]}" if isinstance(device, list) else device
+
+    @contextlib.contextmanager
+    def _legacy_torch_load(self):
+        original_load = torch.load
+
+        def compat_load(*args, **kwargs):
+            kwargs.setdefault("weights_only", False)
+            return original_load(*args, **kwargs)
+
+        torch.load = compat_load
+        try:
+            yield
+        finally:
+            torch.load = original_load

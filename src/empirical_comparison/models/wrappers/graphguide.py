@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import os
 import random
@@ -195,9 +196,24 @@ class GraphGUIDEWrapper(BaseGenerator):
 
         model_type = str(self.config.get("model_type", "gat")).lower()
         cls = self.gg_gnn.GraphLinkGAT if model_type == "gat" else self.gg_gnn.GraphLinkGIN
-        self.model = self.gg_model_util.load_model(cls, str(self.checkpoint_path)).to(self.device)
+        with self._legacy_torch_load():
+            self.model = self.gg_model_util.load_model(cls, str(self.checkpoint_path)).to(self.device)
         self.model.eval()
         self.diffuser = self._build_diffuser()
+
+    @contextlib.contextmanager
+    def _legacy_torch_load(self):
+        original_load = torch.load
+
+        def compat_load(*args, **kwargs):
+            kwargs.setdefault("weights_only", False)
+            return original_load(*args, **kwargs)
+
+        torch.load = compat_load
+        try:
+            yield
+        finally:
+            torch.load = original_load
 
     def train(self, train_graphs, val_graphs=None) -> None:
         """Train GraphGUIDE on a list of NetworkX graphs.

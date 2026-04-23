@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib
 import json
 import logging
@@ -252,7 +253,8 @@ class EDPGNNWrapper(BaseGenerator):
     # ------------------------------------------------------------------
     def load(self) -> None:
         self._import_modules()
-        ckpt = torch.load(self.checkpoint_path, map_location=self.device)
+        with self._legacy_torch_load():
+            ckpt = torch.load(self.checkpoint_path, map_location=self.device)
         self.edp_config = edict(ckpt["config"])
         self.edp_config.dev = self.device
         self.template_graphs = [self._restore_graph(gd) for gd in ckpt["template_graphs"]]
@@ -260,7 +262,8 @@ class EDPGNNWrapper(BaseGenerator):
 
         get_score_model = self.mods["loading_utils"].get_score_model
         get_mc_sampler = self.mods["loading_utils"].get_mc_sampler
-        self.model = get_score_model(self.edp_config, dev=self.device)
+        with self._legacy_torch_load():
+            self.model = get_score_model(self.edp_config, dev=self.device)
         self.model.load_state_dict(ckpt["model_state"], strict=False)
         self.model.to(self.device)
         self.model.eval()
@@ -433,3 +436,17 @@ class EDPGNNWrapper(BaseGenerator):
         if isinstance(obj, torch.device):
             return str(obj)
         return obj
+
+    @contextlib.contextmanager
+    def _legacy_torch_load(self):
+        original_load = torch.load
+
+        def compat_load(*args, **kwargs):
+            kwargs.setdefault("weights_only", False)
+            return original_load(*args, **kwargs)
+
+        torch.load = compat_load
+        try:
+            yield
+        finally:
+            torch.load = original_load

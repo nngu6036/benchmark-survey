@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib
 import json
 import os
@@ -294,8 +295,9 @@ class ConStructWrapper(BaseGenerator):
         SpectreDatasetInfos = self.mods["spectre_dataset"].SpectreDatasetInfos
         SamplingMetrics = self.mods["sampling_metrics"].SamplingMetrics
 
-        datamodule = SpectreGraphDataModule(self.cfg)
-        dataset_infos = SpectreDatasetInfos(datamodule)
+        with self._legacy_torch_load():
+            datamodule = SpectreGraphDataModule(self.cfg)
+            dataset_infos = SpectreDatasetInfos(datamodule)
 
         val_sampling_metrics = SamplingMetrics(
             dataset_infos,
@@ -348,14 +350,15 @@ class ConStructWrapper(BaseGenerator):
     def load(self) -> None:
         self._build_datamodule_and_metrics()
         DiscreteDenoisingDiffusion = self.mods["diffusion_model"].DiscreteDenoisingDiffusion
-        self.model = DiscreteDenoisingDiffusion.load_from_checkpoint(
-            str(self.checkpoint_path),
-            cfg=self.cfg,
-            dataset_infos=self.dataset_infos,
-            val_sampling_metrics=self.val_sampling_metrics,
-            test_sampling_metrics=self.test_sampling_metrics,
-            map_location=self.device,
-        )
+        with self._legacy_torch_load():
+            self.model = DiscreteDenoisingDiffusion.load_from_checkpoint(
+                str(self.checkpoint_path),
+                cfg=self.cfg,
+                dataset_infos=self.dataset_infos,
+                val_sampling_metrics=self.val_sampling_metrics,
+                test_sampling_metrics=self.test_sampling_metrics,
+                map_location=self.device,
+            )
         self.model.eval()
         self.model.to(self.device)
         # Minimal trainer stub so sampling utilities that query trainer fields work.
@@ -431,3 +434,17 @@ class ConStructWrapper(BaseGenerator):
                         g.add_edge(u, v, edge_type=edge_type)
             graphs.append(g)
         return graphs
+
+    @contextlib.contextmanager
+    def _legacy_torch_load(self):
+        original_load = torch.load
+
+        def compat_load(*args, **kwargs):
+            kwargs.setdefault("weights_only", False)
+            return original_load(*args, **kwargs)
+
+        torch.load = compat_load
+        try:
+            yield
+        finally:
+            torch.load = original_load

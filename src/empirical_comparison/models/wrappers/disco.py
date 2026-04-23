@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib
 import json
 import random
@@ -198,9 +199,10 @@ class DisCoWrapper(BaseGenerator):
         to_dense = self.mods["utils"].to_dense
 
         root_arg = str(self.data_root)
-        train_set = SpectreDataset(root=root_arg, name=self.dataset_name, split="train")
-        val_set = SpectreDataset(root=root_arg, name=self.dataset_name, split="val")
-        test_set = SpectreDataset(root=root_arg, name=self.dataset_name, split="test")
+        with self._legacy_torch_load():
+            train_set = SpectreDataset(root=root_arg, name=self.dataset_name, split="train")
+            val_set = SpectreDataset(root=root_arg, name=self.dataset_name, split="val")
+            test_set = SpectreDataset(root=root_arg, name=self.dataset_name, split="test")
 
         self.train_loader = DataLoader(
             train_set,
@@ -312,6 +314,22 @@ class DisCoWrapper(BaseGenerator):
             device=str(self.device),
             BAR=bool(self.config.get("BAR", False)),
         )
+
+    @contextlib.contextmanager
+    def _legacy_torch_load(self):
+        # PyTorch 2.6 changed torch.load(..., weights_only=...) to default to
+        # True. Upstream DisCo dataset code relies on full object unpickling.
+        original_load = torch.load
+
+        def compat_load(*args, **kwargs):
+            kwargs.setdefault("weights_only", False)
+            return original_load(*args, **kwargs)
+
+        torch.load = compat_load
+        try:
+            yield
+        finally:
+            torch.load = original_load
 
     # ------------------------------------------------------------------
     # Training / loading / sampling

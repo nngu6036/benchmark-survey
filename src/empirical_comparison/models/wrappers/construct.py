@@ -478,6 +478,7 @@ class ConStructWrapper(BaseGenerator):
                 global_rank=0,
                 current_epoch=0,
                 is_global_zero=True,
+                progress_bar_callback=None,
                 strategy=SimpleNamespace(barrier=lambda: None),
             )
         else:
@@ -491,6 +492,8 @@ class ConStructWrapper(BaseGenerator):
                 self.model._trainer.current_epoch = 0
             if not hasattr(self.model._trainer, "is_global_zero"):
                 self.model._trainer.is_global_zero = True
+            if not hasattr(self.model._trainer, "progress_bar_callback"):
+                self.model._trainer.progress_bar_callback = None
             if not hasattr(self.model._trainer, "strategy"):
                 self.model._trainer.strategy = SimpleNamespace(barrier=lambda: None)
 

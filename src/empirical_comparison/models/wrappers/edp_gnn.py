@@ -338,7 +338,8 @@ class EDPGNNWrapper(BaseGenerator):
             raise RuntimeError("No template graphs available for sampling.")
         idx = np.random.randint(0, len(self.template_graphs), size=batch_size)
         graph_list = [self.template_graphs[i] for i in idx]
-        base_adjs, base_x = graphs_to_tensor(self.edp_config, graph_list)
+        with self._legacy_networkx_matrix():
+            base_adjs, base_x = graphs_to_tensor(self.edp_config, graph_list)
         base_adjs, base_x = base_adjs.to(self.device), base_x.to(self.device)
         node_flags = base_adjs.sum(-1).gt(1e-5).to(dtype=torch.float32)
         base_adjs = self.mcmc_sampler.gen_init_sample(batch_size, self.edp_config.dataset.max_node_num, node_flags=node_flags)[0]

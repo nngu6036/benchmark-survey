@@ -464,7 +464,7 @@ class EDPGNNWrapper(BaseGenerator):
 
     @contextlib.contextmanager
     def _legacy_networkx_matrix(self):
-        if hasattr(nx, "to_numpy_matrix"):
+        if hasattr(nx, "to_numpy_matrix") and hasattr(nx, "from_numpy_matrix"):
             yield
             return
 
@@ -480,8 +480,24 @@ class EDPGNNWrapper(BaseGenerator):
             )
             return np.asmatrix(arr)
 
-        nx.to_numpy_matrix = compat_to_numpy_matrix
+        def compat_from_numpy_matrix(A, parallel_edges=False, create_using=None, edge_attr="weight"):
+            return nx.from_numpy_array(
+                np.asarray(A),
+                parallel_edges=parallel_edges,
+                create_using=create_using,
+                edge_attr=edge_attr,
+            )
+
+        added_to = not hasattr(nx, "to_numpy_matrix")
+        added_from = not hasattr(nx, "from_numpy_matrix")
+        if added_to:
+            nx.to_numpy_matrix = compat_to_numpy_matrix
+        if added_from:
+            nx.from_numpy_matrix = compat_from_numpy_matrix
         try:
             yield
         finally:
-            delattr(nx, "to_numpy_matrix")
+            if added_to:
+                delattr(nx, "to_numpy_matrix")
+            if added_from:
+                delattr(nx, "from_numpy_matrix")

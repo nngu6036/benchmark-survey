@@ -413,7 +413,6 @@ class DiGressWrapper(BaseGenerator):
 
         self.model.eval()
         self.model.to(self.device)
-        self.model.current_epoch = 0
 
         remaining = int(num_graphs)
         batch_size = int(self.config.get("sample_batch_size", self.cfg.train.batch_size))

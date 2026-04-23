@@ -388,7 +388,8 @@ class EDPGNNWrapper(BaseGenerator):
                 warm_up_count += 1
             else:
                 rounded, _ = self.mcmc_sampler.end_sample(sampled_chunks[0])[0], None
-                generated.extend(adjs_to_graphs(rounded.detach().cpu().numpy()))
+                with self._legacy_networkx_matrix():
+                    generated.extend(adjs_to_graphs(rounded.detach().cpu().numpy()))
             new_init_adjs, new_x, new_flags = self._prepare_init_batch(batch_size)
             init_adjs = torch.cat(list(sampled_chunks[1:]) + [new_init_adjs], dim=0)
             keep = sampled_chunks[0].size(0)

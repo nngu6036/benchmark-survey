@@ -7,6 +7,7 @@ import os
 import shutil
 import types
 import sys
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -134,6 +135,7 @@ class ConStructWrapper(BaseGenerator):
         self.mods["abstract_dataset"] = importlib.import_module(
             "ConStruct.datasets.abstract_dataset"
         )
+        self._patch_missing_orca()
         self.repo_loaded = True
 
     def _ensure_hydra_stub(self) -> None:
@@ -158,6 +160,27 @@ class ConStructWrapper(BaseGenerator):
         spectre_module = self.mods["spectre_dataset"]
         dummy = str((self.repo_root / "_hydra_dummy").resolve())
         spectre_module.get_original_cwd = lambda: dummy
+
+    def _patch_missing_orca(self) -> None:
+        spectre_utils = importlib.import_module("ConStruct.metrics.spectre_utils")
+        if getattr(spectre_utils, "_empirical_orca_patched", False):
+            return
+
+        original_orbit_stats_all = spectre_utils.orbit_stats_all
+
+        def safe_orbit_stats_all(*args, **kwargs):
+            try:
+                return original_orbit_stats_all(*args, **kwargs)
+            except FileNotFoundError as exc:
+                warnings.warn(
+                    f"ConStruct orbit metrics disabled because ORCA binary is missing: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return float("nan")
+
+        spectre_utils.orbit_stats_all = safe_orbit_stats_all
+        spectre_utils._empirical_orca_patched = True
 
     def _default_cfg(self):
         cfg_dir = self.repo_root / "configs"

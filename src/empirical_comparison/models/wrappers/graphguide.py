@@ -189,8 +189,12 @@ class GraphGUIDEWrapper(BaseGenerator):
         if self.input_dim is None:
             input_dim = self.config.get("input_dim")
             if input_dim is None:
+                with self._legacy_torch_load():
+                    ckpt = torch.load(self.checkpoint_path, map_location=self.device)
+                input_dim = ((ckpt.get("model_creation_args") or {}).get("input_dim"))
+            if input_dim is None:
                 raise ValueError(
-                    "GraphGUIDEWrapper.load() needs config['input_dim'] unless train() was run before load()."
+                    "GraphGUIDEWrapper.load() needs config['input_dim'] unless it can be inferred from the checkpoint."
                 )
             self.input_dim = int(input_dim)
 

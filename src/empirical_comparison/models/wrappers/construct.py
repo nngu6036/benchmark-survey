@@ -5,6 +5,7 @@ import importlib
 import json
 import os
 import shutil
+import types
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -116,6 +117,7 @@ class ConStructWrapper(BaseGenerator):
         if self.repo_loaded:
             return
         self._ensure_repo_importable()
+        self._ensure_hydra_stub()
         if not (self.repo_root / "ConStruct").exists():
             raise FileNotFoundError(f"ConStruct package directory not found under repo_root={self.repo_root}")
         self.mods["spectre_dataset"] = importlib.import_module(
@@ -132,6 +134,18 @@ class ConStructWrapper(BaseGenerator):
             "ConStruct.datasets.abstract_dataset"
         )
         self.repo_loaded = True
+
+    def _ensure_hydra_stub(self) -> None:
+        if "hydra.utils" in sys.modules:
+            return
+        hydra_mod = sys.modules.get("hydra")
+        if hydra_mod is None:
+            hydra_mod = types.ModuleType("hydra")
+            sys.modules["hydra"] = hydra_mod
+        utils_mod = types.ModuleType("hydra.utils")
+        utils_mod.get_original_cwd = lambda: str((self.repo_root / "_hydra_dummy").resolve())
+        hydra_mod.utils = utils_mod
+        sys.modules["hydra.utils"] = utils_mod
 
     def _patch_hydra_path_resolution(self) -> None:
         """Patch the imported module-level get_original_cwd used by the datamodule.

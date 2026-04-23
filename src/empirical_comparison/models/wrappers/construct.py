@@ -109,9 +109,10 @@ class ConStructWrapper(BaseGenerator):
         return repo_root
 
     def _ensure_repo_importable(self) -> None:
-        root_str = str(self.repo_root)
-        if root_str not in sys.path:
-            sys.path.insert(0, root_str)
+        for path in (self.repo_root, self.repo_root / "ConStruct"):
+            path_str = str(path)
+            if path_str not in sys.path:
+                sys.path.insert(0, path_str)
 
     def _import_modules(self) -> None:
         if self.repo_loaded:

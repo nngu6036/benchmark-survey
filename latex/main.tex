@@ -4593,26 +4593,26 @@ Datasets & SBM, Planar & synthetic graph benchmarks \\
 
 \begin{table*}[t]
 \centering
-\caption{Illustrative comparison on synthetic benchmarks. Lower is better for discrepancy metrics unless otherwise noted.}
+\caption{Aggregated empirical comparison results.}
 \label{tab:synthetic_benchmark_results}
 \small
-\begin{tabular}{l l c c c c c c}
+\begin{tabular}{l l r r r r r r}
 \toprule
-Dataset & Model & Degree MMD $\downarrow$ & Clustering MMD $\downarrow$ & Orbit MMD $\downarrow$ & Spectral MMD $\downarrow$ & Learned-feature metric $\downarrow$ & Classifier-based metric $\downarrow$ \\
+Dataset & Model & Classifier separation & Degree MMD & Clustering MMD & Orbit MMD & Spectral MMD & Learned-feature MMD \\
 \midrule
-SBM & GraphGUIDE & 0.000040 & 0.178352 & 0.010386 & 0.001606 & 0.000000 & 0.913793 \\
-SBM & DiGress & -0.000003 & 0.000022 & 0.002495 & 0.000270 & 0.000000 & 0.827586 \\
-SBM & ConStruct & 0.000030 & 0.000026 & 0.038882 & 0.002031 & 0.000000 & 0.818966 \\
-SBM & EDP-GNN & 0.810661 & 0.810671 & 0.602778 & 0.730083 & 0.000000 & 0.879310 \\
-SBM & DisCo & 0.000006 & 0.000049 & 0.006141 & 0.001233 & 0.000000 & 0.922414 \\
-SBM & GruM & -0.000005 & 0.000151 & 0.015455 & 0.001932 & 0.000000 & 0.836207 \\
+Planar & ConStruct & 0.000000 & 0.000627 & 0.001017 & 0.221169 & 0.014274 & 1.400688 \\
+Planar & DiGress & 0.318966 & 0.000534 & 0.001015 & 0.178744 & 0.014051 & 0.475956 \\
+Planar & DisCo & 0.224138 & 0.000602 & 0.001008 & 0.180737 & 0.013334 & 0.656563 \\
+Planar & EDP-GNN & 0.000000 & 0.001006 & 0.017639 & 0.218053 & 0.014307 & 1.517441 \\
+Planar & GraphGUIDE & 0.232759 & 0.000599 & 0.001010 & 0.180585 & 0.013956 & 0.478038 \\
+Planar & GruM & 0.129310 & 0.000416 & 0.000790 & 0.152959 & 0.007125 & 0.431248 \\
 \midrule
-Planar & GraphGUIDE & 0.000599 & 0.001010 & 0.180585 & 0.013956 & 0.000000 & 0.948276 \\
-Planar & DiGress & 0.000534 & 0.001015 & 0.178744 & 0.014051 & 0.000000 & 0.844828 \\
-Planar & ConStruct & 0.000627 & 0.001017 & 0.221169 & 0.014274 & 0.000000 & 0.818966 \\
-Planar & EDP-GNN & 0.001006 & 0.017639 & 0.218053 & 0.014307 & 0.000000 & 0.793103 \\
-Planar & DisCo & 0.000602 & 0.001008 & 0.180737 & 0.013334 & 0.000000 & 0.879310 \\
-Planar & GruM & 0.000416 & 0.000790 & 0.152959 & 0.007125 & 0.000000 & 0.844828 \\
+SBM & ConStruct & 0.000000 & 0.000030 & 0.000026 & 0.038882 & 0.002031 & 1.115000 \\
+SBM & DiGress & 0.517241 & -0.000003 & 0.000022 & 0.002495 & 0.000270 & 0.024221 \\
+SBM & DisCo & 0.362069 & 0.000006 & 0.000035 & 0.006252 & 0.001028 & 0.373067 \\
+SBM & EDP-GNN & 0.000000 & 0.810661 & 0.810671 & 0.602778 & 0.730083 & 0.807446 \\
+SBM & GraphGUIDE & 0.387931 & 0.000040 & 0.178352 & 0.010386 & 0.001606 & 0.457012 \\
+SBM & GruM & 0.068966 & -0.000005 & 0.000151 & 0.015455 & 0.001932 & 0.617231 \\
 \bottomrule
 \end{tabular}
 \end{table*}

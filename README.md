@@ -21,7 +21,7 @@ python3 scripts/evaluate_descriptor_metrics.py --model digress --dataset sbm
 python3 scripts/evaluate_learned_feature_metrics.py --model digress --dataset sbm
 python3 scripts/evaluate_classifier_metrics.py --model digress --dataset sbm
 python3 scripts/aggregate_results.py
-python3 scripts/make-latex-tables
+python3 scripts/make_latex_tables.py
 ```
 
 ## Notes

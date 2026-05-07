@@ -1,3 +1,9 @@
-classifier: logistic_regression_placeholder
-score: classifier_separation
-train_test_split: 0.5
+metric: polygraphscore
+mode: jsd
+classifier: auto  # auto = TabPFN if installed, otherwise standardized logistic regression fallback
+reference_split: test
+num_splits: 3
+cv_folds: 4
+skip_orbits: false
+include_attribute_descriptor: true
+interpretation: PGS is a held-out JS-distance lower-bound estimate in [0,1]; lower is better.

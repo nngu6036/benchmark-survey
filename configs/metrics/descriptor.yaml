@@ -1,6 +1,12 @@
+reference_split: test
 descriptors:
   - degree
   - clustering
   - orbit
   - spectral
+  - structural_summary
 discrepancy: mmd
+kernel:
+  histograms: gaussian_emd
+  vectors: rbf
+skip_orbit: true

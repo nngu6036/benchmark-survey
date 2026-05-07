@@ -1,31 +1,196 @@
 from __future__ import annotations
-import argparse, pickle
-from pathlib import Path
+
+import argparse
 import sys
+import time
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
-    
-from empirical_comparison.generation.sampler import sample_graphs
-from empirical_comparison.utils.io import load_yaml
+
+from empirical_comparison.evaluation.data_io import load_dataset_splits
+from empirical_comparison.evaluation.run_utils import (
+    explicit_run_selection,
+    make_model_run_config,
+    parse_run_ids,
+    run_seed,
+    sample_config_path,
+    sample_metadata_path,
+    sample_path,
+    should_use_run_paths,
+)
+from empirical_comparison.generation.sampler import model_capabilities, sample_graphs
+from empirical_comparison.graphs.attributes import apply_empirical_attributes, attribute_coverage, fit_attribute_statistics, normalize_schema
+from empirical_comparison.generation.validity import quality_metrics
+from empirical_comparison.registry import available_datasets, available_models
+from empirical_comparison.utils.io import load_yaml, save_json, save_pickle, save_yaml, stable_hash
 from empirical_comparison.utils.logging import get_logger
+from empirical_comparison.utils.seed import set_seed
+
 logger = get_logger(__name__)
 
+
+def _generate_one_run(
+    *,
+    model_name: str,
+    dataset: str,
+    base_cfg: dict,
+    cfg_path: Path,
+    dataset_root: str,
+    num_samples: int,
+    base_seed: int,
+    seed_stride: int,
+    sample_seed_offset: int,
+    run_id: int,
+    use_run_paths: bool,
+    force: bool,
+    dry_run: bool,
+) -> dict:
+    seed = run_seed(base_seed, run_id, seed_stride) + int(sample_seed_offset)
+    logical_run_id = run_id if use_run_paths else None
+    set_seed(seed)
+    cfg = make_model_run_config(
+        base_cfg,
+        dataset=dataset,
+        model=model_name,
+        run_id=logical_run_id,
+        seed=seed,
+        use_run_paths=use_run_paths,
+    )
+    cfg["num_samples"] = int(num_samples)
+
+    out = sample_path(dataset, model_name, logical_run_id)
+    metadata_out = sample_metadata_path(dataset, model_name, logical_run_id)
+    resolved_cfg_out = sample_config_path(dataset, model_name, logical_run_id)
+    logger.info(
+        "Generating samples: dataset=%s model=%s run_id=%s num_samples=%d seed=%d checkpoint=%s",
+        dataset,
+        model_name,
+        "legacy" if logical_run_id is None else logical_run_id,
+        num_samples,
+        seed,
+        cfg.get("checkpoint_path"),
+    )
+    if dry_run:
+        logger.info("Dry run: would write %s", out)
+        return {"dataset": dataset, "model": model_name, "run_id": logical_run_id, "seed": seed, "sample_path": str(out), "dry_run": True}
+    if out.exists() and not force:
+        raise FileExistsError(f"Sample file already exists: {out}. Use --force to overwrite.")
+
+    start = time.perf_counter()
+    graphs = sample_graphs(model_name, cfg, num_samples, seed=seed)
+    elapsed = time.perf_counter() - start
+    attr_schema = normalize_schema(cfg)
+    attr_postprocess_applied = False
+    try:
+        splits = load_dataset_splits(dataset, output_root=dataset_root, build_if_missing=True)
+        ref_graphs = list(splits.get("train", []))
+    except Exception:
+        ref_graphs = []
+    attr_stats = fit_attribute_statistics(ref_graphs, attr_schema) if ref_graphs else fit_attribute_statistics([], attr_schema)
+    attr_strategy = str(attr_schema.get("generated_attribute_strategy", "empirical")).lower()
+    if attr_stats.has_any_attributes and attr_strategy == "empirical":
+        before_cov = attribute_coverage(graphs, attr_schema)
+        overwrite = bool(attr_schema.get("overwrite_generated_attributes", False))
+        if overwrite or not before_cov.get("has_any_attributes", False):
+            graphs = apply_empirical_attributes(graphs, attr_stats, seed=seed, overwrite=overwrite)
+            attr_postprocess_applied = True
+    quality = quality_metrics(graphs, reference_graphs=ref_graphs, dataset=dataset)
+
+    save_pickle(graphs, out, force=force)
+    metadata = {
+        "dataset": dataset,
+        "model": model_name,
+        "run_id": logical_run_id,
+        "seed": seed,
+        "num_samples_requested": num_samples,
+        "num_samples_saved": len(graphs),
+        "runtime_seconds": elapsed,
+        "seconds_per_graph": elapsed / max(len(graphs), 1),
+        "sample_path": str(out),
+        "checkpoint_path": cfg.get("checkpoint_path"),
+        "model_config_path": str(cfg_path),
+        "model_config_hash": stable_hash(cfg),
+        "capabilities": model_capabilities(model_name),
+        "quality": quality,
+        "graph_attributes": {
+            "schema": attr_schema,
+            "fallback_attribute_postprocessing_applied": attr_postprocess_applied,
+            "fallback_note": "If true, attributes were attached from empirical training-set marginals by the benchmark, not generated natively by the upstream model.",
+            "train_attribute_stats": attr_stats.to_dict(),
+            "train_attribute_coverage": attribute_coverage(ref_graphs, attr_schema) if ref_graphs else {},
+            "generated_attribute_coverage": attribute_coverage(graphs, attr_schema),
+        },
+    }
+    save_json(metadata, metadata_out, force=True)
+    save_yaml(cfg, resolved_cfg_out, force=True)
+    logger.info("Saved %d generated graphs to %s in %.2fs", len(graphs), out, elapsed)
+    logger.info("Saved sample metadata to %s", metadata_out)
+    return metadata
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--dataset", required=True)
+    parser = argparse.ArgumentParser(description="Generate samples from trained graph generator wrapper run(s).")
+    parser.add_argument("--model", required=True, choices=available_models())
+    parser.add_argument("--dataset", required=True, choices=available_datasets())
     parser.add_argument("--num-samples", type=int, default=128)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=42, help="Base seed. Run i uses seed + i * seed_stride.")
+    parser.add_argument("--seed-stride", type=int, default=1000)
+    parser.add_argument("--sample-seed-offset", type=int, default=17, help="Offset added to each training-run seed for sampling.")
+    parser.add_argument("--num-runs", type=int, default=1)
+    parser.add_argument("--run-id", type=int, default=None)
+    parser.add_argument("--run-ids", nargs="+", type=int, default=None)
+    parser.add_argument("--model-config", type=str, default=None)
+    parser.add_argument("--dataset-root", type=str, default="outputs/datasets")
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    cfg = load_yaml(Path("configs/models") / f"{args.model}.yaml")
-    graphs = sample_graphs(args.model, cfg, args.num_samples, seed=args.seed)
-    out = Path("outputs/samples") / args.dataset / f"{args.model}.pkl"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "wb") as f: pickle.dump(graphs, f)
-    logger.info("Saved %d generated graphs to %s", len(graphs), out)
+
+    cfg_path = Path(args.model_config) if args.model_config else Path("configs/models") / f"{args.model}.yaml"
+    base_cfg = load_yaml(cfg_path)
+    run_ids = parse_run_ids(run_id=args.run_id, run_ids=args.run_ids, num_runs=args.num_runs)
+    use_run_paths = should_use_run_paths(run_ids, explicit_run_selection(args.run_id, args.run_ids))
+
+    metadata = []
+    for rid in run_ids:
+        metadata.append(
+            _generate_one_run(
+                model_name=args.model,
+                dataset=args.dataset,
+                base_cfg=base_cfg,
+                cfg_path=cfg_path,
+                dataset_root=args.dataset_root,
+                num_samples=args.num_samples,
+                base_seed=args.seed,
+                seed_stride=args.seed_stride,
+                sample_seed_offset=args.sample_seed_offset,
+                run_id=rid,
+                use_run_paths=use_run_paths,
+                force=args.force,
+                dry_run=args.dry_run,
+            )
+        )
+
+    if not args.dry_run and use_run_paths:
+        manifest = Path("outputs/samples") / args.dataset / args.model / "sample_runs.json"
+        save_json(
+            {
+                "dataset": args.dataset,
+                "model": args.model,
+                "base_seed": args.seed,
+                "seed_stride": args.seed_stride,
+                "sample_seed_offset": args.sample_seed_offset,
+                "num_runs": len(run_ids),
+                "run_ids": run_ids,
+                "runs": metadata,
+            },
+            manifest,
+            force=True,
+        )
+        logger.info("Saved sample-run manifest to %s", manifest)
+
 
 if __name__ == "__main__":
     main()

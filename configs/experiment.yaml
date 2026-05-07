@@ -2,12 +2,15 @@ seed: 42
 num_runs: 3
 num_generated_graphs: 1024
 num_reference_graphs: 1024
+force: false
+continue_on_error: true
 
 datasets:
   - sbm
   - planar
 
 models:
+  - dummy
   - graphguide
   - digress
   - construct
@@ -18,16 +21,26 @@ models:
 metrics:
   descriptor:
     enabled: true
-    descriptors: [degree, clustering, orbit, spectral]
+    reference_split: test
+    descriptors: [degree, clustering, orbit, spectral, structural_summary]
     discrepancy: mmd
+    kernel:
+      histograms: gaussian_emd
+      vectors: rbf
     bootstrap_rounds: 20
+    skip_orbit: true
   learned_feature:
     enabled: true
-    encoder: random_gin
+    reference_split: train
+    encoder: structural
     discrepancy: mmd
     bootstrap_rounds: 20
   classifier:
     enabled: true
-    classifier: logistic_regression_placeholder
-    score: classifier_separation
-    bootstrap_rounds: 20
+    reference_split: test
+    classifier: auto
+    metric: polygraphscore
+    mode: jsd
+    cv_folds: 4
+    skip_orbits: true
+    num_splits: 3

@@ -1,6 +1,91 @@
+# Benchmark adapter config for the uploaded DisCo repository.
+# Set DISCO_REPO=/path/to/DisCo or fill repo_root below.
 name: disco
-checkpoint_path: checkpoints/disco.pt
+seed: 42
+repo_root: null
+
+# Supports {dataset}, ${dataset}, {model}, and ${model} placeholders.
+checkpoint_path: outputs/checkpoints/{dataset}/disco.pt
+run_root: outputs/disco_runs/{dataset}
+data_root: outputs/disco_data/{dataset}
+
+# The wrapper preserves benchmark train/val/test splits directly instead of
+# calling upstream train_spectre.py, which creates its own random split and
+# imports optional internal evaluation dependencies.
+save_provenance_dataset: true
+
+# Runtime
+# CPU DisCo sampling uses many small dense operations; one thread avoids rare
+# OpenMP stalls and is usually faster for small synthetic benchmark graphs.
+device: null
+torch_num_threads: 1
+
+# Training
 batch_size: 32
-sampling:
-  num_steps: 100
-  temperature: 1.0
+sample_batch_size: 32
+num_epochs: 100
+learning_rate: 0.0002
+weight_decay: 5.0e-12
+edge_loss_weight: 5.0
+shuffle: true
+log_interval: 1
+gradient_clip_value: null
+
+# Diffusion settings from train_spectre.py.
+diff_type: marginal
+min_time: 0.01
+sampling_steps: 50
+beta: 2.0
+alpha: 0.8
+
+# The default "safe" sampler follows upstream tau-leaping equations but clamps
+# pathological reverse rates for partially trained/tiny models. Set to
+# "upstream" to use sampling.TauLeaping exactly.
+sampler_backend: safe
+sampler_rate_clip: 1000.0
+BAR: false
+
+# Backbone settings. "GT" follows the uploaded train_spectre.py defaults.
+backbone: GT
+n_layers: 5
+n_dim: 128
+dropout: 0.1
+n_head: 8
+
+# Auxiliary SPECTRE/DiGress-style structural features.
+cycle_fea: true
+eigen_fea: true
+rwpe_fea: false
+global_fea: true
+
+capabilities:
+  supports_graph_labels: false
+  supports_edge_labels: true
+  supports_node_labels: true
+  supports_training: true
+  supports_sampling: true
+  supports_node_features: false
+  supports_edge_features: false
+  supports_constraints: false
+  supports_variable_size: true
+  supports_featureless_graphs: true
+
+# Benchmark-wide canonical NetworkX attribute schema.
+graph_attributes:
+  enabled: auto
+  node_feature_attr: feats
+  node_label_attr: node_label
+  edge_feature_attr: edge_attr
+  edge_label_attr: edge_type
+  graph_label_attr: graph_label
+  node_label_aliases: [label, node_type, type, atom_type]
+  node_feature_aliases: [feature, features, x]
+  edge_label_aliases: [label, edge_label, bond_type, type]
+  edge_feature_aliases: [feature, features, weight]
+  graph_label_aliases: [y, label, target]
+  add_default_node_features: true
+  add_default_node_labels: true
+  add_default_edge_labels: true
+  default_node_feature_dim: 1
+  generated_attribute_strategy: empirical
+  overwrite_generated_attributes: false

@@ -1,7 +1,119 @@
+# GruM wrapper configuration.
+# Set repo_root or export GRUM_REPO to the extracted upstream GruM repository.
+# The wrapper targets the generic-graph path in GruM_2D.
+seed: 42
 name: grum
-checkpoint_path: checkpoints/grum.pt
+repo_root: null
+
+# Benchmark-managed paths. {dataset} is filled by scripts/train_model.py and generate_samples.py.
+device: null
+checkpoint_path: outputs/checkpoints/{dataset}/grum.pt
+run_root: outputs/grum_runs/{dataset}
+data_root: outputs/grum_data/{dataset}
+torch_num_threads: 1
+
+# Upstream base config to read from GruM_2D/config/{base_config}.yaml.
+# null means: use sbm for dataset=sbm, planar for dataset=planar, otherwise planar.
+base_config: null
+
+# Graph/data handling.
+# GruM's original 2D generic code infers valid nodes from nonzero adjacency rows,
+# which drops true isolated nodes. The benchmark wrapper uses explicit masks instead.
+preserve_isolated_nodes: true
+drop_isolates_on_output: false
+max_node_num: null
 batch_size: 32
-num_epochs: 3000
-sampling:
-  num_steps: 100
-  temperature: 1.0
+num_workers: 0
+perm_mix: true
+
+# Node features for featureless benchmark graphs.
+# Upstream GruM uses eigenvector features on SBM/planar. For faster smoke tests, use [const].
+feat_types: [eig1, eig2]
+feat_scale: 10.0
+feat_norm: true
+degree_num_classes: null
+
+# Training. Upstream paper-scale configs use far larger epoch counts; this benchmark
+# default is intentionally moderate and should be tuned for final experiments.
+num_epochs: 100
+learning_rate: 0.0002
+weight_decay: 1.0e-12
+optimizer: adamw
+ema: 0.999
+clip_grad: 1.0
+lr_schedule: false
+lr_decay: 0.999
+reduce_mean: false
+lambda_train: 5.0
+train_eps: 0.002
+loss_type:
+  x: const
+  adj: default
+log_every: 10
+
+# Diffusion mixture. num_scales overrides both x_num_scales and adj_num_scales.
+# Set to 1000 to match the upstream SBM/planar configs.
+num_scales: 1000
+x_sigma_0: null
+x_sigma_1: null
+x_drift_coeff: null
+x_num_scales: null
+adj_sigma_0: null
+adj_sigma_1: null
+adj_drift_coeff: null
+adj_num_scales: null
+
+# Optional compact GraphTransformer overrides. Leaving these null uses the upstream
+# base config dimensions.
+num_layers: null
+hidden_mlp_dims: null
+hidden_dims: null
+model_overrides: {}
+
+# Predictor/corrector sampler. Defaults below mirror upstream generic configs;
+# planar usually benefits from Langevin, SBM usually uses None.
+predictor: Euler
+corrector: null
+snr: null
+scale_eps: null
+corrector_steps: null
+sample_batch_size: 32
+sample_eps: 0.002
+sample_num_scales: null
+use_ema_for_sampling: true
+noise_removal: true
+quantize_threshold: 0.5
+kernel: tv
+
+# Used only when loading an old upstream checkpoint without saved train node-count metadata.
+min_nodes: 1
+max_nodes: 64
+
+capabilities:
+  supports_training: true
+  supports_sampling: true
+  supports_node_features: false
+  supports_edge_features: false
+  supports_constraints: false
+  supports_variable_size: true
+  supports_featureless_graphs: true
+
+# Benchmark-wide canonical NetworkX attribute schema.
+graph_attributes:
+  enabled: auto
+  node_feature_attr: feats
+  node_label_attr: node_label
+  edge_feature_attr: edge_attr
+  edge_label_attr: edge_type
+  graph_label_attr: graph_label
+  node_label_aliases: [label, node_type, type, atom_type]
+  node_feature_aliases: [feature, features, x]
+  edge_label_aliases: [label, edge_label, bond_type, type]
+  edge_feature_aliases: [feature, features, weight]
+  graph_label_aliases: [y, label, target]
+  add_default_node_features: true
+  add_default_node_labels: true
+  add_default_edge_labels: true
+  default_node_feature_dim: 1
+  generated_attribute_strategy: empirical
+  overwrite_generated_attributes: false

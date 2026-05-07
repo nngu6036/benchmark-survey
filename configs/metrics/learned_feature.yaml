@@ -1,3 +1,6 @@
-encoder: random_gin
+reference_split: train
+encoder: structural
 discrepancy: mmd
-feature_dim: 128
+feature_dim: null
+note: structural is the default dependency-light feature encoder; random_gin is retained only for backward compatibility.
+reference_split_note: Generated-vs-training graph representation MMD by default.

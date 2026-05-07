@@ -44,6 +44,10 @@
 \usepackage{float}
 \usepackage{subcaption}
 \usepackage[table]{xcolor}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{makecell}
 % -------------------------
 % Formatting helpers
 % -------------------------
@@ -4593,28 +4597,37 @@ Datasets & SBM, Planar & synthetic graph benchmarks \\
 
 \begin{table*}[t]
 \centering
-\caption{Aggregated empirical comparison results.}
+\caption{Illustrative comparison on synthetic graph benchmarks. Lower is better for discrepancy metrics; classifier AUC is best near 0.5.}
 \label{tab:synthetic_benchmark_results}
 \small
-\begin{tabular}{l l r r r r r r}
+\setlength{\tabcolsep}{2.5pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{l l *{7}{>{\centering\arraybackslash}X}}
 \toprule
-Dataset & Model & Classifier separation & Degree MMD & Clustering MMD & Orbit MMD & Spectral MMD & Learned-feature MMD \\
+Dataset & Model &
+\makecell{Degree\\MMD} &
+\makecell{Clustering\\MMD} &
+\makecell{Structural\\MMD} &
+\makecell{Spectral\\MMD} &
+\makecell{Random-\\feature MMD} &
+\makecell{Classifier\\AUC} &
+\makecell{PGS-style\\JS} \\
 \midrule
-Planar & ConStruct & 0.000000 & 0.000627 & 0.001017 & 0.221169 & 0.014274 & 1.400688 \\
-Planar & DiGress & 0.318966 & 0.000534 & 0.001015 & 0.178744 & 0.014051 & 0.475956 \\
-Planar & DisCo & 0.224138 & 0.000602 & 0.001008 & 0.180737 & 0.013334 & 0.656563 \\
-Planar & EDP-GNN & 0.000000 & 0.001006 & 0.017639 & 0.218053 & 0.014307 & 1.517441 \\
-Planar & GraphGUIDE & 0.232759 & 0.000599 & 0.001010 & 0.180585 & 0.013956 & 0.478038 \\
-Planar & GruM & 0.129310 & 0.000416 & 0.000790 & 0.152959 & 0.007125 & 0.431248 \\
+planar & construct  & 0.0605 & 1.0633 & 1.5063 & 0.0519 & 1.4007 & 1.0000 & 0.9925 \\
+planar & digress    & 0.0004 & 0.1924 & 0.4495 & 0.0604 & 0.4760 & 1.0000 & 0.9808 \\
+planar & disco      & 0.0313 & 0.6569 & 0.5748 & 0.2252 & 0.6566 & 1.0000 & 0.9763 \\
+planar & edp\_gnn   & 0.4172 & 1.7469 & 1.7428 & 1.5098 & 1.5174 & 1.0000 & 0.9971 \\
+planar & graphguide & 0.4114 & 1.2137 & 1.1412 & 1.3686 & 0.4780 & 1.0000 & 0.9740 \\
+planar & grum       & 0.0034 & 0.0722 & 0.4487 & 0.0038 & 0.4312 & 0.9141 & 0.4005 \\
 \midrule
-SBM & ConStruct & 0.000000 & 0.000030 & 0.000026 & 0.038882 & 0.002031 & 1.115000 \\
-SBM & DiGress & 0.517241 & -0.000003 & 0.000022 & 0.002495 & 0.000270 & 0.024221 \\
-SBM & DisCo & 0.362069 & 0.000006 & 0.000035 & 0.006252 & 0.001028 & 0.373067 \\
-SBM & EDP-GNN & 0.000000 & 0.810661 & 0.810671 & 0.602778 & 0.730083 & 0.807446 \\
-SBM & GraphGUIDE & 0.387931 & 0.000040 & 0.178352 & 0.010386 & 0.001606 & 0.457012 \\
-SBM & GruM & 0.068966 & -0.000005 & 0.000151 & 0.015455 & 0.001932 & 0.617231 \\
+sbm & construct  & 0.0030 & 1.4203 & 0.8097 & 0.6004 & 1.1150 & 1.0000 & 0.9947 \\
+sbm & digress    & 0.0006 & 0.1153 & 0.0172 & 0.0062 & 0.0242 & 0.8174 & 0.1491 \\
+sbm & disco      & 0.1469 & 0.8385 & 0.3383 & 0.2148 & 0.3731 & 0.9957 & 0.8597 \\
+sbm & edp\_gnn   & 1.9919 & 1.6704 & 0.7986 & 1.9475 & 0.8074 & 1.0000 & 0.9978 \\
+sbm & graphguide & 0.2249 & 1.0556 & 0.8491 & 1.1485 & 0.4570 & 1.0000 & 0.9816 \\
+sbm & grum       & 0.0206 & 0.4554 & 0.5546 & 0.0849 & 0.6172 & 0.9925 & 0.8396 \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{table*}
 
 \subsection{Efficiency and scalability}

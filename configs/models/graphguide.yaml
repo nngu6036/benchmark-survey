@@ -1,6 +1,89 @@
+# GraphGUIDE wrapper configuration.
+# Set repo_root or export GRAPHGUIDE_REPO to the extracted upstream GraphGUIDE repo.
+seed: 42
 name: graphguide
-checkpoint_path: checkpoints/graphguide.pt
+repo_root: null
+
+device: null
+checkpoint_path: outputs/checkpoints/{dataset}/graphguide.pt
+run_root: outputs/graphguide_runs/{dataset}
+data_root: outputs/graphguide_data/{dataset}
+torch_num_threads: 1
+
+# GraphGUIDE generates edge sets conditioned on node features and graph size.
+node_feature_attr: feats
+force_constant_features: false
+default_node_feature_dim: 1
+drop_node_features_on_output: false
+max_templates: 2048
+template_strategy: random  # random or cycle
+
+# Training
+num_epochs: 100
 batch_size: 32
-sampling:
-  num_steps: 100
-  temperature: 1.0
+learning_rate: 0.001
+weight_decay: 0.0
+clip_grad: 1.0
+val_every: 10
+num_workers: 0
+
+# Diffusion horizon and sampler batching.
+t_limit: 1000
+sample_batch_size: 32
+verbose_sampling: false
+
+# Upstream GraphGUIDE model backbone.
+# Options: gat, gin, digress.
+model_type: gat
+model_kwargs:
+  num_gnn_layers: 4
+  gat_num_heads: 8
+  gat_hidden_dim: 32
+  hidden_dim: 256
+  time_embed_size: 256
+  spectrum_dim: 5
+
+# Upstream Bernoulli diffuser.
+# Options: bernoulli, bernoulli_one, bernoulli_zero,
+#          bernoulli_skip, bernoulli_one_skip, bernoulli_zero_skip.
+# The GraphGUIDE notebooks commonly use bernoulli_one_skip for edge addition,
+# bernoulli_zero_skip for edge deletion, and bernoulli_skip for bit flipping.
+diffuser_type: bernoulli_zero_skip
+diffuser_kwargs:
+  a: 100
+  b: 10
+
+# Used only if loading an old checkpoint without saved train templates.
+min_nodes: 10
+max_nodes: 20
+
+capabilities:
+  supports_edge_labels: false
+  supports_node_labels: false
+  supports_training: true
+  supports_sampling: true
+  supports_node_features: true
+  supports_edge_features: false
+  supports_constraints: false
+  supports_variable_size: true
+  supports_featureless_graphs: true
+
+# Benchmark-wide canonical NetworkX attribute schema.
+graph_attributes:
+  enabled: auto
+  node_feature_attr: feats
+  node_label_attr: node_label
+  edge_feature_attr: edge_attr
+  edge_label_attr: edge_type
+  graph_label_attr: graph_label
+  node_label_aliases: [label, node_type, type, atom_type]
+  node_feature_aliases: [feature, features, x]
+  edge_label_aliases: [label, edge_label, bond_type, type]
+  edge_feature_aliases: [feature, features, weight]
+  graph_label_aliases: [y, label, target]
+  add_default_node_features: true
+  add_default_node_labels: true
+  add_default_edge_labels: true
+  default_node_feature_dim: 1
+  generated_attribute_strategy: empirical
+  overwrite_generated_attributes: false

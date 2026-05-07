@@ -1,6 +1,93 @@
+# ConStruct wrapper configuration.
+# Set repo_root or export CONSTRUCT_REPO to the extracted upstream ConStruct repo.
+seed: 42
 name: construct
-checkpoint_path: checkpoints/construct.pt
+repo_root: null
+
+device: null
+checkpoint_path: outputs/checkpoints/{dataset}/construct.pt
+run_root: outputs/construct_runs/{dataset}
+data_root: outputs/construct_data/{dataset}
+torch_num_threads: 1
+
+# Training
+num_epochs: 100
 batch_size: 32
-sampling:
-  num_steps: 100
-  temperature: 1.0
+learning_rate: 0.0002
+weight_decay: 1.0e-12
+clip_grad: null
+val_every: 10
+nodes_dist_source: train  # train is benchmark-fair; upstream ConStruct used all splits.
+
+# Discrete diffusion
+transition: absorbing_edges
+diffusion_steps: 500
+sampling_steps: 500
+sample_batch_size: 32
+nu:
+  x: 1
+  c: 1
+  e: 1
+  y: 1
+
+# ConStruct reverse projection. Use planar for planar datasets; false for generic SBM.
+rev_proj: null
+
+# GraphTransformer backbone
+n_layers: 5
+hidden_mlp_dims:
+  X: 256
+  E: 128
+  y: 128
+hidden_dims:
+  dx: 256
+  de: 64
+  dy: 64
+  n_head: 8
+  dim_ffX: 256
+  dim_ffE: 128
+  dim_ffy: 128
+dropout: 0.1
+dropout_in_and_out: false
+lambda_train: [1, 2, 5, 0]
+
+# Auxiliary structural features. max_degree must be >= 6 because ConStruct computes A^1..A^6.
+extra_features: true
+eigenfeatures: true
+max_degree: 10
+num_degree: 10
+num_eigenvectors: 5
+num_eigenvalues: 9
+cycle_features: true
+
+capabilities:
+  supports_graph_labels: false
+  supports_edge_labels: true
+  supports_node_labels: true
+  supports_training: true
+  supports_sampling: true
+  supports_node_features: false
+  supports_edge_features: false
+  supports_constraints: true
+  supports_variable_size: true
+  supports_featureless_graphs: true
+
+# Benchmark-wide canonical NetworkX attribute schema.
+graph_attributes:
+  enabled: auto
+  node_feature_attr: feats
+  node_label_attr: node_label
+  edge_feature_attr: edge_attr
+  edge_label_attr: edge_type
+  graph_label_attr: graph_label
+  node_label_aliases: [label, node_type, type, atom_type]
+  node_feature_aliases: [feature, features, x]
+  edge_label_aliases: [label, edge_label, bond_type, type]
+  edge_feature_aliases: [feature, features, weight]
+  graph_label_aliases: [y, label, target]
+  add_default_node_features: true
+  add_default_node_labels: true
+  add_default_edge_labels: true
+  default_node_feature_dim: 1
+  generated_attribute_strategy: empirical
+  overwrite_generated_attributes: false

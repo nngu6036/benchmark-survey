@@ -1,0 +1,39 @@
+name: dummy
+num_nodes: 64
+edge_prob: 0.05
+variable_size: false
+batch_size: 128
+sampling:
+  num_steps: 1
+  temperature: 1.0
+capabilities:
+  supports_graph_labels: true
+  supports_edge_labels: true
+  supports_node_labels: true
+  supports_training: true
+  supports_sampling: true
+  supports_node_features: true
+  supports_edge_features: true
+  supports_constraints: false
+  supports_variable_size: true
+  supports_featureless_graphs: true
+
+# Benchmark-wide canonical NetworkX attribute schema.
+graph_attributes:
+  enabled: auto
+  node_feature_attr: feats
+  node_label_attr: node_label
+  edge_feature_attr: edge_attr
+  edge_label_attr: edge_type
+  graph_label_attr: graph_label
+  node_label_aliases: [label, node_type, type, atom_type]
+  node_feature_aliases: [feature, features, x]
+  edge_label_aliases: [label, edge_label, bond_type, type]
+  edge_feature_aliases: [feature, features, weight]
+  graph_label_aliases: [y, label, target]
+  add_default_node_features: true
+  add_default_node_labels: true
+  add_default_edge_labels: true
+  default_node_feature_dim: 1
+  generated_attribute_strategy: empirical
+  overwrite_generated_attributes: false

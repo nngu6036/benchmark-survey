@@ -1,6 +1,84 @@
+# Benchmark adapter config for the uploaded EDP-GNN repository.
+# Set EDP_GNN_REPO=/path/to/EDP-GNN or fill repo_root below.
 name: edp_gnn
-checkpoint_path: checkpoints/edp_gnn.pt
+seed: 42
+repo_root: null
+
+# Supports {dataset}, ${dataset}, {model}, and ${model} placeholders.
+checkpoint_path: outputs/checkpoints/{dataset}/edp_gnn.pt
+run_root: outputs/edp_gnn_runs/{dataset}
+data_dir: null
+
+# Upstream EDP-GNN infers valid nodes from nonzero adjacency rows. That drops
+# true isolated nodes. The benchmark wrapper defaults to explicit node masks so
+# graph sizes and isolated nodes are preserved across training/sampling.
+preserve_isolated_nodes: true
+feature_normalization: per_graph
+
+# Training
 batch_size: 32
+sample_batch_size: 32
+test_batch_size: 32
+num_epochs: 100
+learning_rate: 0.001
+lr_dacey: 0.999
+weight_decay: 0.0
+shuffle: true
+log_interval: 1
+
+# Noise levels used by EDP-GNN score matching.
+sigmas: [0.1, 0.2, 0.4, 0.6, 0.8, 1.6]
+
+# Langevin sampler. These mirror the uploaded repository's config names.
+eps: [0.5]
+grad_step_size: [0.01]
+step_num: 1000
+fixed_node_number: true
+
+# Alternative nested form consumed by the wrapper if top-level fields are absent.
 sampling:
-  num_steps: 100
+  eps: 0.5
+  grad_step_size: 0.01
+  num_steps: 1000
   temperature: 1.0
+
+# Upstream score-network parameters: config.model.models.model_1.
+model_overrides:
+  dropout_p: 0.0
+  gnn_hidden_num_list: [16, 16, 16, 16]
+  feature_nums: [16, 16, 16, 16, 16]
+  channel_num_list: [2, 4, 4, 4, 2]
+  name: gin
+  use_norm_layers: false
+stack_num: 1
+
+capabilities:
+  supports_edge_labels: false
+  supports_node_labels: false
+  supports_training: true
+  supports_sampling: true
+  supports_node_features: true
+  supports_edge_features: false
+  supports_constraints: false
+  supports_variable_size: true
+  supports_featureless_graphs: true
+
+# Benchmark-wide canonical NetworkX attribute schema.
+graph_attributes:
+  enabled: auto
+  node_feature_attr: feats
+  node_label_attr: node_label
+  edge_feature_attr: edge_attr
+  edge_label_attr: edge_type
+  graph_label_attr: graph_label
+  node_label_aliases: [label, node_type, type, atom_type]
+  node_feature_aliases: [feature, features, x]
+  edge_label_aliases: [label, edge_label, bond_type, type]
+  edge_feature_aliases: [feature, features, weight]
+  graph_label_aliases: [y, label, target]
+  add_default_node_features: true
+  add_default_node_labels: true
+  add_default_edge_labels: true
+  default_node_feature_dim: 1
+  generated_attribute_strategy: empirical
+  overwrite_generated_attributes: false

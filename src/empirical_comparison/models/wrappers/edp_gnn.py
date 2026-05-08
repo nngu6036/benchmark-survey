@@ -63,6 +63,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 try:
     from empirical_comparison.models.base import BaseGenerator
+    from empirical_comparison.utils.progress import update_progress
 except Exception:  # pragma: no cover
     class BaseGenerator:  # type: ignore[no-redef]
         supports_training = True
@@ -75,6 +76,10 @@ except Exception:  # pragma: no cover
 
         def __init__(self, config: dict[str, Any]) -> None:
             self.config = config
+
+    def update_progress(progress_callback, amount: int) -> None:  # type: ignore[no-redef]
+        if progress_callback is not None and int(amount) > 0:
+            progress_callback(int(amount))
 
 
 LOGGER = logging.getLogger(__name__)
@@ -645,7 +650,7 @@ class EDPGNNWrapper(BaseGenerator):
         )[0]
         return init_adjs, base_x, node_flags
 
-    def sample(self, num_graphs: int, seed: int = 0):
+    def sample(self, num_graphs: int, seed: int = 0, progress_callback=None):
         self._import_modules()
         if self.model is None or self.mcmc_sampler is None or self.edp_config is None:
             self.load()
@@ -691,12 +696,14 @@ class EDPGNNWrapper(BaseGenerator):
                 warm_up_count += 1
             else:
                 rounded_adjs, _ = self.mcmc_sampler.end_sample(sampled_chunks[0], to_int=True)
+                before = len(generated)
                 generated.extend(
                     self._adjs_to_graphs(
                         rounded_adjs.detach().cpu().numpy(),
                         flag_chunks[0].detach().cpu().numpy(),
                     )
                 )
+                update_progress(progress_callback, min(len(generated), num_graphs) - min(before, num_graphs))
 
             new_init_adjs, new_x, new_flags = self._prepare_init_batch(batch_size)
             init_adjs = torch.cat(list(sampled_chunks[1:]) + [new_init_adjs], dim=0)

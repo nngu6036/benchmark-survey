@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 
 from empirical_comparison.models.base import BaseGenerator
+from empirical_comparison.utils.progress import update_progress
 
 
 @dataclass
@@ -922,7 +923,7 @@ class DisCoWrapper(BaseGenerator):
     # Sampling
     # ------------------------------------------------------------------
     @torch.no_grad()
-    def sample(self, num_graphs: int, seed: int = 0):
+    def sample(self, num_graphs: int, seed: int = 0, progress_callback=None):
         if self.model is None:
             self.load()
         if self.model is None or self.sampler is None or self.diffuser is None or self.n_node_distribution is None:
@@ -948,6 +949,7 @@ class DisCoWrapper(BaseGenerator):
                 n_node = replacement
 
             X_sample, E, _node_mask = self.sampler.sample(self.diffuser, self.model, n_node)
+            before = len(graphs)
             for i in range(batch):
                 n = int(n_node[i].item())
                 edge_mat = E[i, :n, :n].detach().cpu().numpy().astype(np.int64)
@@ -965,6 +967,7 @@ class DisCoWrapper(BaseGenerator):
                         if et > 0:
                             graph.add_edge(u, v, edge_type=et)
                 graphs.append(graph)
+            update_progress(progress_callback, min(len(graphs), num_graphs) - min(before, num_graphs))
             remaining -= batch
 
         return graphs

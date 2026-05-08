@@ -16,6 +16,7 @@ import numpy as np
 import torch
 
 from empirical_comparison.models.base import BaseGenerator
+from empirical_comparison.utils.progress import update_progress
 
 
 class GraphGUIDEWrapper(BaseGenerator):
@@ -607,7 +608,7 @@ class GraphGUIDEWrapper(BaseGenerator):
         batch.edge_index = self.gg_graph_conversions.edge_vector_to_pyg_data(batch, prior_edges)
         return batch
 
-    def sample(self, num_graphs: int, seed: int = 0):
+    def sample(self, num_graphs: int, seed: int = 0, progress_callback=None):
         if self.model is None or self.diffuser is None:
             raise RuntimeError("Call load() or train() before sample().")
         if num_graphs <= 0:
@@ -633,7 +634,9 @@ class GraphGUIDEWrapper(BaseGenerator):
                     verbose=self.verbose_sampling,
                 )
             batch_graphs = self.gg_graph_conversions.split_pyg_data_to_nx_graphs(samples)
+            before = len(generated)
             generated.extend(self._postprocess_output_graph(g) for g in batch_graphs)
+            update_progress(progress_callback, min(len(generated), num_graphs) - min(before, num_graphs))
         return generated[:num_graphs]
 
     def _postprocess_output_graph(self, graph: nx.Graph) -> nx.Graph:

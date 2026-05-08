@@ -8,6 +8,7 @@ import numpy as np
 
 from empirical_comparison.graphs.attributes import apply_empirical_attributes, fit_attribute_statistics, normalize_schema
 from empirical_comparison.models.base import BaseGenerator
+from empirical_comparison.utils.progress import update_progress
 from empirical_comparison.utils.io import load_pickle, save_pickle
 
 
@@ -83,7 +84,7 @@ class DummyGraphGenerator(BaseGenerator):
                 force=True,
             )
 
-    def sample(self, num_graphs: int, seed: int = 0):
+    def sample(self, num_graphs: int, seed: int = 0, progress_callback=None):
         rng = np.random.default_rng(seed)
         graphs: list[nx.Graph] = []
         for _ in range(num_graphs):
@@ -93,6 +94,7 @@ class DummyGraphGenerator(BaseGenerator):
                 n = self.num_nodes
             g = nx.gnp_random_graph(n=n, p=self.edge_prob, seed=int(rng.integers(0, 2**31 - 1)))
             graphs.append(nx.convert_node_labels_to_integers(g))
+            update_progress(progress_callback, 1)
         if self.attr_stats:
             graphs = apply_empirical_attributes(graphs, self.attr_stats, seed=seed, overwrite=True)
         return graphs

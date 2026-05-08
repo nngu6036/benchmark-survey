@@ -17,6 +17,8 @@ import networkx as nx
 import numpy as np
 import torch
 import yaml
+
+from empirical_comparison.utils.progress import update_progress
 from torch.utils.data import DataLoader, TensorDataset
 
 
@@ -433,7 +435,7 @@ class GruMWrapper:
         self._train_graphs = train_split
         self._ema_copied_for_sampling = False
 
-    def sample(self, num_graphs: int, seed: int = 0) -> List[nx.Graph]:
+    def sample(self, num_graphs: int, seed: int = 0, progress_callback=None) -> List[nx.Graph]:
         if self._model is None or self._loaded_config is None:
             self.load()
         assert self._model is not None
@@ -458,7 +460,9 @@ class GruMWrapper:
             current_bs = min(batch_size, int(num_graphs) - len(graphs))
             masks = self._sample_node_masks(current_bs, max_node_num, seed + len(graphs)).to(self._device())
             x, adj = self._sample_batch(model, config, masks, feature_dim)
+            before = len(graphs)
             graphs.extend(self._adjs_to_graphs(adj, masks))
+            update_progress(progress_callback, min(len(graphs), num_graphs) - min(before, num_graphs))
         return graphs[:num_graphs]
 
     # ------------------------------------------------------------------

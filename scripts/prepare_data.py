@@ -24,6 +24,8 @@ def main() -> None:
     parser.add_argument("--dataset", required=True, choices=available_datasets())
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--output-root", type=str, default="outputs/datasets")
+    parser.add_argument("--download-root", type=str, default=None, help="Override raw download/cache root for real PyG datasets such as QM9 and ZINC.")
+    parser.add_argument("--max-graphs", type=int, default=None, help="Optional cap on the number of raw graphs converted before splitting.")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--force", action="store_true", help="Overwrite existing persisted splits and metadata.")
     parser.add_argument("--dry-run", action="store_true", help="Validate config and print planned outputs without writing files.")
@@ -33,6 +35,10 @@ def main() -> None:
     cfg = load_yaml(cfg_path)
     if args.seed is not None:
         cfg["seed"] = args.seed
+    if args.download_root is not None:
+        cfg["pyg_root"] = args.download_root
+    if args.max_graphs is not None:
+        cfg["max_graphs"] = int(args.max_graphs)
     seed = int(cfg.get("seed", 42))
     set_seed(seed)
 

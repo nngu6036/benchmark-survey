@@ -18,6 +18,7 @@ import torch
 import torch.nn.functional as F
 
 from empirical_comparison.models.base import BaseGenerator
+from empirical_comparison.utils.progress import update_progress
 
 
 class _ConfigNode(types.SimpleNamespace):
@@ -395,6 +396,7 @@ class _DenseConStructModel(torch.nn.Module):
         faster_sampling: int,
         rev_proj: str | bool | None,
         projector_classes: dict[str, Any] | None,
+        progress_callback=None,
     ) -> list[_PlaceHolder]:
         if samples_to_generate <= 0:
             return []
@@ -415,6 +417,7 @@ class _DenseConStructModel(torch.nn.Module):
                     projector_classes=projector_classes,
                 )
             )
+            update_progress(progress_callback, cur)
             remaining -= cur
         return batches
 
@@ -970,7 +973,7 @@ class ConStructWrapper(BaseGenerator):
                 indent=2,
             )
 
-    def sample(self, num_graphs: int, seed: int = 0):
+    def sample(self, num_graphs: int, seed: int = 0, progress_callback=None):
         if self.model is None:
             self.load()
         if self.model is None:
@@ -994,6 +997,7 @@ class ConStructWrapper(BaseGenerator):
                 faster_sampling=int(self.cfg.sampling.faster_sampling),
                 rev_proj=rev_proj,
                 projector_classes=projector_classes,
+                progress_callback=progress_callback,
             )
         graphs: list[nx.Graph] = []
         for batch in batches:

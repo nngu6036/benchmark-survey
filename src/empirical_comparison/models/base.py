@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar
+from typing import Any, Callable, ClassVar
 
 
 class BaseGenerator(ABC):
@@ -33,7 +33,7 @@ class BaseGenerator(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def sample(self, num_graphs: int, seed: int = 0):
+    def sample(self, num_graphs: int, seed: int = 0, progress_callback: Callable[[int], None] | None = None):
         """Return a list of generated NetworkX graphs."""
         raise NotImplementedError
 

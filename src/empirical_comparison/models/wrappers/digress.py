@@ -18,6 +18,7 @@ from omegaconf import OmegaConf
 from pytorch_lightning import Trainer
 
 from empirical_comparison.models.base import BaseGenerator
+from empirical_comparison.utils.progress import update_progress
 
 
 class _NoOpSamplingMetrics(torch.nn.Module):
@@ -505,7 +506,7 @@ class DiGressWrapper(BaseGenerator):
         trainer.save_checkpoint(str(self.checkpoint_path))
         self.model.eval()
 
-    def sample(self, num_graphs: int, seed: int = 0):
+    def sample(self, num_graphs: int, seed: int = 0, progress_callback=None):
         if self.model is None:
             self.load()
 
@@ -536,7 +537,9 @@ class DiGressWrapper(BaseGenerator):
                     save_final=0,
                     num_nodes=None,
                 )
+                before = len(out_graphs)
                 out_graphs.extend(self._samples_to_networkx(samples))
+                update_progress(progress_callback, min(len(out_graphs), num_graphs) - min(before, num_graphs))
                 remaining -= cur_bs
                 batch_id += cur_bs
 

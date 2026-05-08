@@ -63,6 +63,18 @@ DATASET_REGISTRY = LazyRegistry(
     {
         "sbm": RegistrySpec("empirical_comparison.datasets.sbm", "SBMDatasetBuilder", "dataset"),
         "planar": RegistrySpec("empirical_comparison.datasets.planar", "PlanarDatasetBuilder", "dataset"),
+        "qm9": RegistrySpec(
+            "empirical_comparison.datasets.molecular",
+            "QM9DatasetBuilder",
+            "dataset",
+            "Install torch-geometric to download and process QM9.",
+        ),
+        "zinc": RegistrySpec(
+            "empirical_comparison.datasets.molecular",
+            "ZINCDatasetBuilder",
+            "dataset",
+            "Install torch-geometric to download and process ZINC.",
+        ),
     }
 )
 

@@ -47,6 +47,7 @@ def _generate_one_run(
     use_run_paths: bool,
     force: bool,
     dry_run: bool,
+    show_progress: bool,
 ) -> dict:
     seed = run_seed(base_seed, run_id, seed_stride) + int(sample_seed_offset)
     logical_run_id = run_id if use_run_paths else None
@@ -80,7 +81,14 @@ def _generate_one_run(
         raise FileExistsError(f"Sample file already exists: {out}. Use --force to overwrite.")
 
     start = time.perf_counter()
-    graphs = sample_graphs(model_name, cfg, num_samples, seed=seed)
+    graphs = sample_graphs(
+        model_name,
+        cfg,
+        num_samples,
+        seed=seed,
+        show_progress=show_progress,
+        progress_desc=f"Sampling {dataset}/{model_name}/{'legacy' if logical_run_id is None else f'run {logical_run_id}'}",
+    )
     elapsed = time.perf_counter() - start
     attr_schema = normalize_schema(cfg)
     attr_postprocess_applied = False
@@ -146,6 +154,7 @@ def main() -> None:
     parser.add_argument("--dataset-root", type=str, default="outputs/datasets")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-progress", action="store_true", help="Disable the sampling progress bar.")
     args = parser.parse_args()
 
     cfg_path = Path(args.model_config) if args.model_config else Path("configs/models") / f"{args.model}.yaml"
@@ -170,6 +179,7 @@ def main() -> None:
                 use_run_paths=use_run_paths,
                 force=args.force,
                 dry_run=args.dry_run,
+                show_progress=not args.no_progress,
             )
         )
 

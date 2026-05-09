@@ -1,7 +1,7 @@
 name: planar
 seed: 42
 root: outputs/datasets
-num_graphs: 1024
+num_graphs: 200
 num_nodes: 64
 remove_self_loops: true
 preprocessing:

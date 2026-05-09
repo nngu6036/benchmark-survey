@@ -7,6 +7,7 @@ import os
 import random
 import shutil
 import sys
+import time
 import warnings
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,11 @@ from omegaconf import OmegaConf
 from pytorch_lightning import Trainer
 
 from empirical_comparison.models.base import BaseGenerator
+from empirical_comparison.utils.logging import get_logger
 from empirical_comparison.utils.progress import update_progress
+
+
+LOGGER = get_logger(__name__)
 
 
 class _NoOpSamplingMetrics(torch.nn.Module):
@@ -40,6 +45,79 @@ class _NoOpSamplingMetrics(torch.nn.Module):
         return {"disabled": True, "reason": self.reason}
 
 
+class _BenchmarkQM9Infos:
+    """Dataset info object for benchmark-owned QM9 splits.
+
+    This mirrors the attributes DiGress needs from upstream ``QM9infos`` without
+    importing ``qm9_dataset.py``, which requires RDKit even when benchmark QM9
+    data has already been prepared from PyG's preprocessed archive.
+    """
+
+    name = "qm9"
+    need_to_strip = False
+
+    def __init__(self, datamodule: Any, cfg: Any, distribution_nodes: Any, utils_mod: Any) -> None:
+        self.remove_h = bool(cfg.dataset.remove_h)
+        self._distribution_nodes = distribution_nodes
+        if self.remove_h:
+            self.atom_encoder = {"C": 0, "N": 1, "O": 2, "F": 3}
+            self.atom_decoder = ["C", "N", "O", "F"]
+            self.valencies = [4, 3, 2, 1]
+            self.atom_weights = {0: 12, 1: 14, 2: 16, 3: 19}
+        else:
+            self.atom_encoder = {"H": 0, "C": 1, "N": 2, "O": 3, "F": 4}
+            self.atom_decoder = ["H", "C", "N", "O", "F"]
+            self.valencies = [1, 4, 3, 2, 1]
+            self.atom_weights = {0: 1, 1: 12, 2: 14, 3: 16, 4: 19}
+        self.num_atom_types = len(self.atom_decoder)
+        self.n_nodes = datamodule.node_counts(max_nodes_possible=64)
+        self.node_types = datamodule.node_types()
+        self.edge_types = datamodule.edge_counts()
+        self.max_n_nodes = len(self.n_nodes) - 1
+        self.max_weight = max(1, self.max_n_nodes * max(self.atom_weights.values()))
+        self.valency_distribution = datamodule.valency_count(self.max_n_nodes)
+        self.complete_infos(n_nodes=self.n_nodes, node_types=self.node_types)
+
+    def complete_infos(self, n_nodes, node_types) -> None:
+        self.input_dims = None
+        self.output_dims = None
+        self.num_classes = len(node_types)
+        self.max_n_nodes = len(n_nodes) - 1
+        self.nodes_dist = self._distribution_nodes(n_nodes)
+
+    def compute_input_output_dims(self, datamodule, extra_features, domain_features) -> None:
+        example_batch = next(iter(datamodule.train_dataloader()))
+        utils_mod = importlib.import_module("src.utils")
+        ex_dense, node_mask = utils_mod.to_dense(
+            example_batch.x,
+            example_batch.edge_index,
+            example_batch.edge_attr,
+            example_batch.batch,
+        )
+        example_data = {"X_t": ex_dense.X, "E_t": ex_dense.E, "y_t": example_batch["y"], "node_mask": node_mask}
+
+        self.input_dims = {
+            "X": example_batch["x"].size(1),
+            "E": example_batch["edge_attr"].size(1),
+            "y": example_batch["y"].size(1) + 1,
+        }
+        ex_extra_feat = extra_features(example_data)
+        self.input_dims["X"] += ex_extra_feat.X.size(-1)
+        self.input_dims["E"] += ex_extra_feat.E.size(-1)
+        self.input_dims["y"] += ex_extra_feat.y.size(-1)
+
+        ex_extra_molecular_feat = domain_features(example_data)
+        self.input_dims["X"] += ex_extra_molecular_feat.X.size(-1)
+        self.input_dims["E"] += ex_extra_molecular_feat.E.size(-1)
+        self.input_dims["y"] += ex_extra_molecular_feat.y.size(-1)
+
+        self.output_dims = {
+            "X": example_batch["x"].size(1),
+            "E": example_batch["edge_attr"].size(1),
+            "y": 0,
+        }
+
+
 class DiGressWrapper(BaseGenerator):
     """Benchmark adapter for the upstream DiGress repository.
 
@@ -54,10 +132,12 @@ class DiGressWrapper(BaseGenerator):
     * ``ExtraFeatures`` / ``DummyExtraFeatures``
     * ``DiscreteDenoisingDiffusion``
 
-    The wrapper is intended for the benchmark's featureless synthetic datasets
-    (currently ``sbm`` and ``planar``). It materializes benchmark NetworkX splits
-    into DiGress's SPECTRE raw format: ``raw/train.pt``, ``raw/val.pt`` and
-    ``raw/test.pt``, each storing a list of dense binary adjacency tensors.
+    For featureless synthetic datasets (``sbm``, ``planar``, ``comm20``), it
+    materializes benchmark NetworkX splits into DiGress's SPECTRE raw format:
+    ``raw/train.pt``, ``raw/val.pt`` and ``raw/test.pt``, each storing a list of
+    dense binary adjacency tensors. For ``qm9``, it converts benchmark NetworkX
+    molecules into PyG ``Data`` objects with one-hot atom and bond classes and
+    uses DiGress's molecular data path.
 
     Important config keys
     ---------------------
@@ -69,7 +149,7 @@ class DiGressWrapper(BaseGenerator):
     dataset / dataset_name: str
         Benchmark dataset name. ``dataset`` is injected by the benchmark scripts;
         ``dataset_name`` can override it. Supported values: ``sbm``, ``planar``,
-        ``comm20``.
+        ``comm20``, ``qm9``.
     checkpoint_path: str
         Path used by ``load`` and ``train``. Relative paths are resolved against
         the current working directory.
@@ -84,8 +164,12 @@ class DiGressWrapper(BaseGenerator):
 
     Notes
     -----
-    * Node and edge attributes from NetworkX graphs are ignored; DiGress's SPECTRE
-      pipeline uses one dummy node type and two edge classes: no-edge and edge.
+    * Node and edge attributes from NetworkX graphs are ignored for SPECTRE
+      datasets; that path uses one dummy node type and two edge classes:
+      no-edge and edge.
+    * For QM9, ``node_label`` and ``edge_type`` are consumed as atom and bond
+      classes. The benchmark's canonical QM9 schema maps H/C/N/O/F to 0..4 and
+      bond classes to 1..4, with 0 reserved for no-edge.
     * DiGress samples by iterating all ``cfg.model.diffusion_steps``. The benchmark
       ``sampling.num_steps`` field is therefore not used to shorten sampling unless
       you explicitly set ``model_overrides.diffusion_steps`` before training.
@@ -95,13 +179,17 @@ class DiGressWrapper(BaseGenerator):
 
     supports_training = True
     supports_sampling = True
-    supports_node_features = False
+    supports_node_features = True
     supports_edge_features = False
+    supports_node_labels = True
+    supports_edge_labels = True
     supports_constraints = False
     supports_variable_size = True
     supports_featureless_graphs = True
 
-    SUPPORTED_DATASETS = {"sbm", "planar", "comm20"}
+    SPECTRE_DATASETS = {"sbm", "planar", "comm20"}
+    MOLECULAR_DATASETS = {"qm9"}
+    SUPPORTED_DATASETS = SPECTRE_DATASETS | MOLECULAR_DATASETS
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
@@ -109,9 +197,13 @@ class DiGressWrapper(BaseGenerator):
         self.dataset_name = str(config.get("dataset_name") or config.get("dataset") or "sbm").lower()
         if self.dataset_name not in self.SUPPORTED_DATASETS:
             raise ValueError(
-                f"DiGressWrapper supports only {sorted(self.SUPPORTED_DATASETS)} for the SPECTRE path; "
+                f"DiGressWrapper supports only {sorted(self.SUPPORTED_DATASETS)}; "
                 f"got dataset={self.dataset_name!r}."
             )
+        self.is_molecular = self.dataset_name in self.MOLECULAR_DATASETS
+        self.detailed_logging = bool(config.get("detailed_logging", True))
+        self.log_train_every_n_steps = max(1, int(config.get("log_train_every_n_steps", 1)))
+        self.log_sample_every_n_batches = max(1, int(config.get("log_sample_every_n_batches", 1)))
 
         default_repo_root = Path(__file__).resolve().parents[4] / "external" / "DiGress"
         repo_root = os.environ.get("DIGRESS_REPO") or config.get("repo_root") or default_repo_root
@@ -179,6 +271,8 @@ class DiGressWrapper(BaseGenerator):
     def _import_modules(self) -> None:
         if self.repo_loaded:
             return
+        started_at = time.perf_counter()
+        self._log("importing upstream DiGress modules dataset=%s", self.dataset_name)
         self._ensure_repo_layout()
         self._ensure_repo_importable()
         try:
@@ -186,6 +280,16 @@ class DiGressWrapper(BaseGenerator):
             self._imports["metrics_abstract"] = importlib.import_module("src.metrics.abstract_metrics")
             self._imports["extra_features"] = importlib.import_module("src.diffusion.extra_features")
             self._imports["diffusion_model_discrete"] = importlib.import_module("src.diffusion_model_discrete")
+            if self.is_molecular:
+                self._imports["datasets_abstract"] = importlib.import_module("src.datasets.abstract_dataset")
+                self._imports["digress_utils"] = importlib.import_module("src.utils")
+                self._imports["distributions"] = importlib.import_module("src.diffusion.distributions")
+                self._imports["metrics_molecular_discrete"] = importlib.import_module(
+                    "src.metrics.molecular_metrics_discrete"
+                )
+                self._imports["extra_features_molecular"] = importlib.import_module(
+                    "src.diffusion.extra_features_molecular"
+                )
         except ModuleNotFoundError as exc:
             missing = getattr(exc, "name", "") or str(exc)
             raise ModuleNotFoundError(
@@ -195,6 +299,7 @@ class DiGressWrapper(BaseGenerator):
             ) from exc
         self._patch_spectre_dataset_process()
         self.repo_loaded = True
+        self._log("imported upstream DiGress modules duration=%.3fs", time.perf_counter() - started_at)
 
     def _patch_spectre_dataset_process(self) -> None:
         """Patch a small upstream SPECTRE processing issue at runtime.
@@ -276,6 +381,8 @@ class DiGressWrapper(BaseGenerator):
         cfg.train.seed = int(self.config.get("seed", 0))
 
         cfg.dataset.name = self.dataset_name
+        if self.is_molecular:
+            cfg.dataset.remove_h = bool(self.config.get("remove_h", False))
         # SpectreGraphDataModule joins DiGress repo_root with cfg.dataset.datadir.
         # Absolute paths bypass that join and keep benchmark artifacts out of the external repo.
         cfg.dataset.datadir = str(self.data_root)
@@ -352,37 +459,199 @@ class DiGressWrapper(BaseGenerator):
             json.dump(metadata, f, indent=2)
 
     # ------------------------------------------------------------------
+    # Molecular data materialization
+    # ------------------------------------------------------------------
+    def _atom_class_count(self) -> int:
+        if self.dataset_name != "qm9":
+            raise ValueError(f"Unsupported molecular DiGress dataset: {self.dataset_name}")
+        return 4 if bool(self.config.get("remove_h", False)) else 5
+
+    def _bond_class_count(self) -> int:
+        # No bond, single, double, triple, aromatic.
+        return 5
+
+    def _graph_to_molecular_data(self, graph: nx.Graph, split_name: str, idx: int):
+        from torch_geometric.data import Data
+
+        if graph.number_of_nodes() == 0:
+            raise ValueError(f"DiGressWrapper does not support empty molecules: split={split_name}, index={idx}")
+        if graph.is_directed():
+            raise ValueError(f"DiGressWrapper expects undirected molecules: split={split_name}, index={idx}")
+
+        g = nx.convert_node_labels_to_integers(nx.Graph(graph), ordering="default")
+        remove_h = bool(self.config.get("remove_h", False))
+        if remove_h:
+            h_nodes = [node for node, attrs in g.nodes(data=True) if int(attrs.get("node_label", 0)) == 0]
+            g.remove_nodes_from(h_nodes)
+            if g.number_of_nodes() == 0:
+                raise ValueError(f"QM9 molecule became empty after remove_h=True: split={split_name}, index={idx}")
+            g = nx.convert_node_labels_to_integers(g, ordering="default")
+
+        n_atom_classes = self._atom_class_count()
+        atom_indices = []
+        for node in range(g.number_of_nodes()):
+            atom_class = int(g.nodes[node].get("node_label", 0))
+            if remove_h:
+                atom_class -= 1
+            if atom_class < 0 or atom_class >= n_atom_classes:
+                raise ValueError(
+                    f"Invalid QM9 atom class {atom_class} after remove_h={remove_h}: "
+                    f"split={split_name}, index={idx}, node={node}. Expected range [0, {n_atom_classes - 1}]."
+                )
+            atom_indices.append(atom_class)
+        x = torch.nn.functional.one_hot(
+            torch.tensor(atom_indices, dtype=torch.long),
+            num_classes=n_atom_classes,
+        ).float()
+
+        edge_index_values: list[list[int]] = []
+        edge_type_values: list[int] = []
+        for u, v, attrs in g.edges(data=True):
+            if u == v:
+                continue
+            edge_type = int(attrs.get("edge_type", 1))
+            edge_type = max(1, min(edge_type, self._bond_class_count() - 1))
+            edge_index_values.extend([[int(u), int(v)], [int(v), int(u)]])
+            edge_type_values.extend([edge_type, edge_type])
+        if edge_index_values:
+            edge_index = torch.tensor(edge_index_values, dtype=torch.long).t().contiguous()
+            edge_attr = torch.nn.functional.one_hot(
+                torch.tensor(edge_type_values, dtype=torch.long),
+                num_classes=self._bond_class_count(),
+            ).float()
+        else:
+            edge_index = torch.empty((2, 0), dtype=torch.long)
+            edge_attr = torch.empty((0, self._bond_class_count()), dtype=torch.float)
+
+        y = torch.zeros((1, 0), dtype=torch.float)
+        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
+        data.n_nodes = torch.tensor([g.number_of_nodes()], dtype=torch.long)
+        return data
+
+    def _graphs_to_molecular_data(self, graphs: list[nx.Graph], split_name: str) -> list[Any]:
+        started_at = time.perf_counter()
+        data_list = [self._graph_to_molecular_data(graph, split_name, idx) for idx, graph in enumerate(graphs)]
+        if not data_list:
+            raise ValueError(f"DiGressWrapper received an empty {split_name} split.")
+        node_counts = [int(data.x.shape[0]) for data in data_list]
+        edge_counts = [int(data.edge_index.shape[1] // 2) for data in data_list]
+        self._log(
+            "converted molecular split=%s count=%d nodes_min=%d nodes_max=%d edges_min=%d edges_max=%d duration=%.3fs",
+            split_name,
+            len(data_list),
+            min(node_counts),
+            max(node_counts),
+            min(edge_counts),
+            max(edge_counts),
+            time.perf_counter() - started_at,
+        )
+        return data_list
+
+    def _write_molecular_splits(
+        self,
+        train_graphs: list[nx.Graph],
+        val_graphs: list[nx.Graph] | None,
+        test_graphs: list[nx.Graph] | None,
+    ) -> dict[str, list[Any]]:
+        started_at = time.perf_counter()
+        self.data_root.mkdir(parents=True, exist_ok=True)
+        train_data = self._graphs_to_molecular_data(list(train_graphs), "train")
+        if val_graphs is None or len(val_graphs) == 0:
+            n_val = max(1, int(round(0.1 * len(train_data))))
+            val_data = [data.clone() for data in train_data[:n_val]]
+        else:
+            val_data = self._graphs_to_molecular_data(list(val_graphs), "val")
+        if test_graphs is None or len(test_graphs) == 0:
+            test_data = [data.clone() for data in val_data]
+        else:
+            test_data = self._graphs_to_molecular_data(list(test_graphs), "test")
+
+        splits = {"train": train_data, "val": val_data, "test": test_data}
+        torch.save(splits, self.data_root / "benchmark_molecular_splits.pt")
+        metadata = {
+            "dataset_name": self.dataset_name,
+            "num_train": len(train_data),
+            "num_val": len(val_data),
+            "num_test": len(test_data),
+            "remove_h": bool(self.config.get("remove_h", False)),
+            "format": "dict of benchmark-converted PyG molecular Data objects for DiGress",
+        }
+        with open(self.data_root / "empirical_comparison_meta.json", "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2)
+        self._log(
+            "wrote molecular splits path=%s duration=%.3fs",
+            self.data_root / "benchmark_molecular_splits.pt",
+            time.perf_counter() - started_at,
+        )
+        return splits
+
+    def _load_molecular_splits(self) -> dict[str, list[Any]]:
+        path = self.data_root / "benchmark_molecular_splits.pt"
+        if not path.exists():
+            raise FileNotFoundError(
+                f"DiGress molecular split file not found: {path}. Train first so the wrapper can persist "
+                "benchmark QM9 splits, or keep data_subdir pointing at the training run's data directory."
+            )
+        with self._legacy_torch_load():
+            splits = torch.load(path)
+        return {"train": list(splits["train"]), "val": list(splits["val"]), "test": list(splits["test"])}
+
+    # ------------------------------------------------------------------
     # Model/datamodule construction
     # ------------------------------------------------------------------
-    def _build_components(self) -> None:
+    def _build_components(self, molecular_splits: dict[str, list[Any]] | None = None) -> None:
+        started_at = time.perf_counter()
+        self._log("build_components_start molecular=%s", self.is_molecular)
         self._import_modules()
         self.cfg = self._default_cfg()
 
-        SpectreGraphDataModule = self._imports["datasets_spectre"].SpectreGraphDataModule
-        SpectreDatasetInfos = self._imports["datasets_spectre"].SpectreDatasetInfos
         TrainAbstractMetricsDiscrete = self._imports["metrics_abstract"].TrainAbstractMetricsDiscrete
         ExtraFeatures = self._imports["extra_features"].ExtraFeatures
         DummyExtraFeatures = self._imports["extra_features"].DummyExtraFeatures
         DiscreteDenoisingDiffusion = self._imports["diffusion_model_discrete"].DiscreteDenoisingDiffusion
 
-        with self._legacy_torch_load():
-            datamodule = SpectreGraphDataModule(self.cfg)
-            dataset_infos = SpectreDatasetInfos(datamodule, self.cfg.dataset)
+        if self.is_molecular:
+            if molecular_splits is None:
+                molecular_splits = self._load_molecular_splits()
+            MolecularDataModule = self._imports["datasets_abstract"].MolecularDataModule
+            TrainMolecularMetricsDiscrete = self._imports["metrics_molecular_discrete"].TrainMolecularMetricsDiscrete
+            ExtraMolecularFeatures = self._imports["extra_features_molecular"].ExtraMolecularFeatures
 
-        train_metrics = TrainAbstractMetricsDiscrete()
-        extra_feature_cfg = self.cfg.model.extra_features
-        if extra_feature_cfg is not None:
-            extra_features = ExtraFeatures(extra_feature_cfg, dataset_info=dataset_infos)
-        else:
+            datamodule = MolecularDataModule(self.cfg, molecular_splits)
+            dataset_infos = _BenchmarkQM9Infos(
+                datamodule=datamodule,
+                cfg=self.cfg,
+                distribution_nodes=self._imports["distributions"].DistributionNodes,
+                utils_mod=self._imports["digress_utils"],
+            )
+            train_metrics = TrainMolecularMetricsDiscrete(dataset_infos)
             extra_features = DummyExtraFeatures()
-        domain_features = DummyExtraFeatures()
+            domain_features = ExtraMolecularFeatures(dataset_infos=dataset_infos)
+            sampling_metrics = _NoOpSamplingMetrics(
+                reason="benchmark wrapper disables upstream molecular sampling metrics"
+            )
+        else:
+            SpectreGraphDataModule = self._imports["datasets_spectre"].SpectreGraphDataModule
+            SpectreDatasetInfos = self._imports["datasets_spectre"].SpectreDatasetInfos
+            with self._legacy_torch_load():
+                datamodule = SpectreGraphDataModule(self.cfg)
+                dataset_infos = SpectreDatasetInfos(datamodule, self.cfg.dataset)
+
+            train_metrics = TrainAbstractMetricsDiscrete()
+            extra_feature_cfg = self.cfg.model.extra_features
+            if extra_feature_cfg is not None:
+                extra_features = ExtraFeatures(extra_feature_cfg, dataset_info=dataset_infos)
+            else:
+                extra_features = DummyExtraFeatures()
+            domain_features = DummyExtraFeatures()
+            sampling_metrics = self._build_sampling_metrics(datamodule)
+
         dataset_infos.compute_input_output_dims(
             datamodule=datamodule,
             extra_features=extra_features,
             domain_features=domain_features,
         )
 
-        sampling_metrics = self._build_sampling_metrics(datamodule)
         model = DiscreteDenoisingDiffusion(
             cfg=self.cfg,
             dataset_infos=dataset_infos,
@@ -397,6 +666,7 @@ class DiGressWrapper(BaseGenerator):
         self.datamodule = datamodule
         self.dataset_infos = dataset_infos
         self.model = model
+        self._log("build_components_end parameters=%d duration=%.3fs", self._count_parameters(model), time.perf_counter() - started_at)
 
     def _build_sampling_metrics(self, datamodule: Any) -> torch.nn.Module:
         try:
@@ -465,6 +735,8 @@ class DiGressWrapper(BaseGenerator):
     # ------------------------------------------------------------------
     def load(self) -> None:
         """Load a trained DiGress checkpoint from ``checkpoint_path``."""
+        started_at = time.perf_counter()
+        self._log("load_start checkpoint_path=%s", self.checkpoint_path)
         if not self.checkpoint_path.exists():
             raise FileNotFoundError(
                 f"DiGress checkpoint not found: {self.checkpoint_path}. Train first with "
@@ -485,28 +757,48 @@ class DiGressWrapper(BaseGenerator):
         self._clear_lightning_hparams(self.model)
         self.model.eval()
         self.model.to(self.device)
+        self._log("load_end duration=%.3fs", time.perf_counter() - started_at)
 
     def train(self, train_graphs, val_graphs=None, test_graphs=None) -> None:
         """Train DiGress on persisted benchmark splits."""
+        started_at = time.perf_counter()
         seed = int(self.config.get("seed", 0))
+        self._log(
+            "train_start dataset=%s molecular=%s seed=%d train_count=%d val_count=%s test_count=%s",
+            self.dataset_name,
+            self.is_molecular,
+            seed,
+            len(train_graphs or []),
+            None if val_graphs is None else len(val_graphs),
+            None if test_graphs is None else len(test_graphs),
+        )
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
-        self._write_raw_splits(train_graphs, val_graphs, test_graphs)
-        self._build_components()
+        if self.is_molecular:
+            molecular_splits = self._write_molecular_splits(train_graphs, val_graphs, test_graphs)
+            self._build_components(molecular_splits=molecular_splits)
+        else:
+            self._write_raw_splits(train_graphs, val_graphs, test_graphs)
+            self._build_components()
         self.model.to(self.device)
 
         trainer = self._make_trainer()
+        self._log("trainer_fit_start max_epochs=%s batch_size=%s", self.cfg.train.n_epochs, self.cfg.train.batch_size)
         trainer.fit(self.model, datamodule=self.datamodule)
+        self._log("trainer_fit_end global_step=%s current_epoch=%s", trainer.global_step, trainer.current_epoch)
 
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         trainer.save_checkpoint(str(self.checkpoint_path))
         self.model.eval()
+        self._log("train_end checkpoint_path=%s duration=%.3fs", self.checkpoint_path, time.perf_counter() - started_at)
 
     def sample(self, num_graphs: int, seed: int = 0, progress_callback=None):
+        started_at = time.perf_counter()
+        self._log("sample_start num_graphs=%d seed=%d", num_graphs, seed)
         if self.model is None:
             self.load()
 
@@ -528,7 +820,10 @@ class DiGressWrapper(BaseGenerator):
         number_chain_steps = min(int(self.cfg.general.number_chain_steps), max(1, int(self.model.T) - 1))
         with torch.no_grad():
             while remaining > 0:
+                batch_started_at = time.perf_counter()
                 cur_bs = min(batch_size, remaining)
+                if batch_id % self.log_sample_every_n_batches == 0:
+                    self._log("sample_batch_start batch_id=%d batch_size=%d remaining=%d", batch_id, cur_bs, remaining)
                 samples = self.model.sample_batch(
                     batch_id=batch_id,
                     batch_size=cur_bs,
@@ -541,9 +836,19 @@ class DiGressWrapper(BaseGenerator):
                 out_graphs.extend(self._samples_to_networkx(samples))
                 update_progress(progress_callback, min(len(out_graphs), num_graphs) - min(before, num_graphs))
                 remaining -= cur_bs
+                if batch_id % self.log_sample_every_n_batches == 0:
+                    self._log(
+                        "sample_batch_end batch_id=%d generated_batch=%d generated_total=%d duration=%.3fs",
+                        batch_id,
+                        len(out_graphs) - before,
+                        len(out_graphs),
+                        time.perf_counter() - batch_started_at,
+                    )
                 batch_id += cur_bs
 
-        return out_graphs[:num_graphs]
+        result = out_graphs[:num_graphs]
+        self._log("sample_end returned=%d duration=%.3fs", len(result), time.perf_counter() - started_at)
+        return result
 
     # ------------------------------------------------------------------
     # Converters
@@ -557,10 +862,25 @@ class DiGressWrapper(BaseGenerator):
             n = int(atom_types.shape[0])
             graph = nx.Graph()
             for i in range(n):
-                graph.add_node(i)
+                if self.is_molecular:
+                    atom_class = int(atom_types[i])
+                    graph.add_node(i, node_label=atom_class, feats=np.array([float(atom_class)], dtype=np.float32))
+                else:
+                    graph.add_node(i)
             for i in range(n):
                 for j in range(i + 1, n):
-                    if int(edge_types[i, j]) > 0:
-                        graph.add_edge(i, j)
+                    edge_type = int(edge_types[i, j])
+                    if edge_type > 0:
+                        if self.is_molecular:
+                            graph.add_edge(i, j, edge_type=edge_type)
+                        else:
+                            graph.add_edge(i, j)
             out.append(graph)
         return out
+
+    def _log(self, message: str, *args: Any) -> None:
+        if getattr(self, "detailed_logging", False):
+            LOGGER.info("DiGressWrapper " + message, *args)
+
+    def _count_parameters(self, model: torch.nn.Module) -> int:
+        return int(sum(p.numel() for p in model.parameters()))

@@ -8,6 +8,10 @@ repo_root: null
 # The benchmark scripts inject `dataset`; set dataset_name only if you want to override it.
 dataset_name: null
 
+# QM9 molecular path. The benchmark QM9 conversion keeps hydrogens by default,
+# so DiGress should use the with-H atom vocabulary unless this is set true.
+remove_h: false
+
 # DiGress SPECTRE tensors created from benchmark NetworkX splits are stored here.
 data_subdir: outputs/digress_data/${dataset}
 
@@ -18,6 +22,11 @@ num_epochs: 100
 learning_rate: 0.0002
 num_workers: 0
 gpus: 0
+
+# Detailed wrapper logging.
+detailed_logging: true
+log_train_every_n_steps: 1
+log_sample_every_n_batches: 1
 
 # DiGress samples using all model.diffusion_steps. `sampling.num_steps` is kept
 # as metadata for benchmark consistency; use model_overrides.diffusion_steps
@@ -35,8 +44,10 @@ dataset_overrides: {}
 capabilities:
   supports_training: true
   supports_sampling: true
-  supports_node_features: false
+  supports_node_features: true
   supports_edge_features: false
+  supports_node_labels: true
+  supports_edge_labels: true
   supports_constraints: false
   supports_variable_size: true
   supports_featureless_graphs: true

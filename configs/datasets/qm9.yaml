@@ -3,6 +3,10 @@ seed: 42
 root: outputs/datasets
 pyg_root: outputs/raw_datasets/qm9
 
+# Use PyG's official preprocessed archive instead of RDKit raw-SDF parsing.
+# This avoids RDKit/PyG crashes where a raw molecule is parsed as None.
+prefer_preprocessed: true
+
 # QM9 has about 130k molecules. Keep the default benchmark preparation
 # lightweight; set max_graphs: null or pass --max-graphs for another size.
 max_graphs: 12000

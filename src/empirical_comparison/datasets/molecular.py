@@ -6,7 +6,11 @@ from typing import Any, Iterable, Sequence
 import networkx as nx
 import numpy as np
 
+from empirical_comparison.utils.logging import get_logger
+
 from empirical_comparison.datasets.base import BaseDatasetBuilder
+
+logger = get_logger(__name__)
 
 
 def _optional_int(value: Any, default: int | None = None) -> int | None:
@@ -59,6 +63,12 @@ class _MolecularDatasetBuilder(BaseDatasetBuilder):
         self.min_nodes = _optional_int(config.get("min_nodes", filter_cfg.get("min_nodes")), None)
         self.max_nodes = _optional_int(config.get("max_nodes", filter_cfg.get("max_nodes")), None)
         self.shuffle = bool(config.get("shuffle", True))
+        # QM9-specific option. When RDKit is installed, PyG normally tries to
+        # parse the raw SDF file. Some RDKit/PyG combinations can return None
+        # for a molecule and crash inside PyG preprocessing. The PyG team also
+        # provides an official preprocessed QM9 archive, so the benchmark can
+        # use that robust path by default.
+        self.prefer_preprocessed = bool(config.get("prefer_preprocessed", False))
 
     def _import_pyg_dataset(self, class_name: str):
         try:
@@ -193,9 +203,111 @@ class _MolecularDatasetBuilder(BaseDatasetBuilder):
 class QM9DatasetBuilder(_MolecularDatasetBuilder):
     pyg_dataset_name = "qm9"
 
-    def build(self) -> dict[str, list[nx.Graph]]:
+    @staticmethod
+    def _safe_torch_load(path: str | Path):
+        import torch
+
+        try:
+            return torch.load(path, weights_only=False)
+        except TypeError:  # Older PyTorch versions do not support weights_only.
+            return torch.load(path)
+
+    def _remove_partial_processed_file(self) -> None:
+        processed_path = self.pyg_root / "processed" / "data_v3.pt"
+        if processed_path.exists():
+            processed_path.unlink()
+
+    def _load_preprocessed_qm9(self):
+        """Load PyG's official preprocessed QM9 archive, bypassing RDKit parsing."""
+
+        import os
+        import torch
+
+        try:
+            from torch_geometric.data import Data, InMemoryDataset, download_url, extract_zip  # type: ignore
+        except ModuleNotFoundError as exc:  # pragma: no cover - depends on optional install.
+            raise ModuleNotFoundError(
+                "QM9 dataset preparation requires PyTorch Geometric. Install `torch-geometric` "
+                "or use `pip install -r requirements.txt`."
+            ) from exc
+
         QM9 = self._import_pyg_dataset("QM9")
-        dataset = QM9(root=str(self.pyg_root))
+        processed_url = getattr(QM9, "processed_url", "https://data.pyg.org/datasets/qm9_v3.zip")
+        safe_torch_load = self._safe_torch_load
+
+        class PreprocessedQM9(InMemoryDataset):
+            @property
+            def raw_file_names(self) -> list[str]:
+                return ["qm9_v3.pt"]
+
+            @property
+            def processed_file_names(self) -> str:
+                return "data_v3.pt"
+
+            def download(self) -> None:
+                zip_path = download_url(processed_url, self.raw_dir)
+                extract_zip(zip_path, self.raw_dir)
+                try:
+                    os.unlink(zip_path)
+                except OSError:
+                    pass
+
+            def process(self) -> None:
+                obj = safe_torch_load(self.raw_paths[0])
+                if isinstance(obj, tuple) and len(obj) == 2:
+                    torch.save(obj, self.processed_paths[0])
+                    return
+
+                data_list = []
+                for item in obj:
+                    data = Data(**item) if isinstance(item, dict) else item
+                    if self.pre_filter is not None and not self.pre_filter(data):
+                        continue
+                    if self.pre_transform is not None:
+                        data = self.pre_transform(data)
+                    data_list.append(data)
+                torch.save(self.collate(data_list), self.processed_paths[0])
+
+            def __init__(self, root: str):
+                super().__init__(root)
+                self.data, self.slices = safe_torch_load(self.processed_paths[0])
+
+        try:
+            return PreprocessedQM9(root=str(self.pyg_root))
+        except Exception as exc:
+            logger.warning(
+                "Cached preprocessed QM9 load failed (%s). Removing cached QM9 processed/raw "
+                "preprocessed files and retrying once.",
+                exc,
+            )
+            for cache_file in (
+                self.pyg_root / "processed" / "data_v3.pt",
+                self.pyg_root / "raw" / "qm9_v3.pt",
+            ):
+                if cache_file.exists():
+                    cache_file.unlink()
+            return PreprocessedQM9(root=str(self.pyg_root))
+
+    def _load_qm9(self):
+        if self.prefer_preprocessed:
+            logger.info("Loading QM9 from PyG's official preprocessed archive.")
+            return self._load_preprocessed_qm9()
+
+        QM9 = self._import_pyg_dataset("QM9")
+        try:
+            return QM9(root=str(self.pyg_root))
+        except Exception as exc:
+            logger.warning(
+                "PyG QM9 raw RDKit preprocessing failed (%s). Falling back to PyG's official "
+                "preprocessed QM9 archive. To use this path directly, set prefer_preprocessed: true "
+                "in configs/datasets/qm9.yaml.",
+                exc,
+            )
+            self._remove_partial_processed_file()
+            return self._load_preprocessed_qm9()
+
+    def build(self) -> dict[str, list[nx.Graph]]:
+        dataset = self._load_qm9()
         graphs = self._convert_many(dataset, limit=self.max_graphs, seed_offset=0)
         return self.split_graphs(graphs)
 

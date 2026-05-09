@@ -8,7 +8,6 @@ import os
 import pickle
 import random
 import sys
-import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,12 +18,8 @@ import numpy as np
 import torch
 import yaml
 
-from empirical_comparison.utils.logging import get_logger
 from empirical_comparison.utils.progress import update_progress
 from torch.utils.data import DataLoader, TensorDataset
-
-
-LOGGER = get_logger(__name__)
 
 
 class _EasyDict(dict):
@@ -240,19 +235,6 @@ class GruMWrapper:
         self._train_node_counts: Optional[List[int]] = None
         self._train_graphs: Optional[List[nx.Graph]] = None
         self._ema_copied_for_sampling = False
-        self.detailed_logging = bool(self.config.get("detailed_logging", True))
-        self.log_train_every_n_steps = max(1, int(self.config.get("log_train_every_n_steps", 1)))
-        self.log_sample_every_n_batches = max(1, int(self.config.get("log_sample_every_n_batches", 1)))
-        self._log(
-            "initialized dataset=%s device=%s repo_root=%s project_root=%s checkpoint_path=%s data_root=%s run_root=%s",
-            self.dataset_name,
-            self._device(),
-            self.repo_root,
-            self.project_root,
-            self.checkpoint_path,
-            self.data_root,
-            self.run_root,
-        )
 
     @property
     def name(self) -> str:
@@ -277,8 +259,6 @@ class GruMWrapper:
     # Public benchmark API
     # ------------------------------------------------------------------
     def load(self) -> None:
-        started_at = time.perf_counter()
-        self._log("load_start checkpoint_path=%s", self.checkpoint_path)
         if not self.checkpoint_path.exists():
             raise FileNotFoundError(
                 f"GruM checkpoint not found: {self.checkpoint_path}. "
@@ -339,12 +319,6 @@ class GruMWrapper:
             self._train_graphs = splits.get("train") or None
             if not self._train_node_counts and self._train_graphs:
                 self._train_node_counts = [g.number_of_nodes() for g in self._train_graphs]
-        self._log(
-            "load_end node_counts=%d has_ema=%s duration=%.3fs",
-            len(self._train_node_counts or []),
-            self._ema is not None,
-            time.perf_counter() - started_at,
-        )
 
     def train(
         self,
@@ -352,14 +326,6 @@ class GruMWrapper:
         val_graphs: Optional[Sequence[nx.Graph]] = None,
         test_graphs: Optional[Sequence[nx.Graph]] = None,
     ) -> None:
-        started_at = time.perf_counter()
-        self._log(
-            "train_start train_count=%d val_count=%s test_count=%s seed=%s",
-            len(train_graphs or []),
-            None if val_graphs is None else len(val_graphs),
-            None if test_graphs is None else len(test_graphs),
-            self._cfg("seed", 0),
-        )
         self._set_seed(int(self._cfg("seed", 0)))
         mods = self._import_modules()
 
@@ -374,23 +340,9 @@ class GruMWrapper:
             test_split = list(val_split)
 
         config = self._build_config(train_split)
-        self._log(
-            "config_built epochs=%d batch_size=%d max_node_num=%d feature_dim=%d lr=%.6g",
-            int(config.train.num_epochs),
-            int(config.data.batch_size),
-            int(config.data.max_node_num),
-            int(config.data.max_feat_num),
-            float(config.train.lr),
-        )
         self._write_provenance(train_split, val_split, test_split, config)
 
         train_x, train_adj, train_mask = self._graphs_to_tensors(train_split, config)
-        self._log(
-            "tensorized_train x_shape=%s adj_shape=%s mask_shape=%s",
-            tuple(train_x.shape),
-            tuple(train_adj.shape),
-            tuple(train_mask.shape),
-        )
         dataset = TensorDataset(train_x, train_adj, train_mask)
         loader = DataLoader(
             dataset,
@@ -402,7 +354,6 @@ class GruMWrapper:
 
         params = self._model_params(config)
         model = self._instantiate_model(params).to(self._device())
-        self._log("model_built parameters=%d", self._count_parameters(model))
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=float(config.train.lr),
@@ -422,12 +373,10 @@ class GruMWrapper:
 
         model.train()
         for epoch in range(num_epochs):
-            epoch_started_at = time.perf_counter()
             losses_x: List[float] = []
             losses_adj: List[float] = []
             losses_total: List[float] = []
-            for batch_idx, (x, adj, mask) in enumerate(loader):
-                batch_started_at = time.perf_counter()
+            for x, adj, mask in loader:
                 x = x.to(self._device())
                 adj = adj.to(self._device())
                 mask = mask.to(self._device())
@@ -443,18 +392,6 @@ class GruMWrapper:
                 losses_total.append(float(loss.detach().cpu()))
                 losses_x.append(float(loss_x.detach().cpu()))
                 losses_adj.append(float(loss_adj.detach().cpu()))
-                if batch_idx % self.log_train_every_n_steps == 0:
-                    self._log(
-                        "train_batch_end epoch=%d/%d batch=%d loss=%.6e loss_x=%.6e loss_adj=%.6e batch_shape=%s duration=%.3fs",
-                        epoch + 1,
-                        num_epochs,
-                        batch_idx + 1,
-                        float(loss.detach().cpu()),
-                        float(loss_x.detach().cpu()),
-                        float(loss_adj.detach().cpu()),
-                        tuple(x.shape),
-                        time.perf_counter() - batch_started_at,
-                    )
             if scheduler is not None:
                 scheduler.step()
             epoch_stats = {
@@ -465,14 +402,10 @@ class GruMWrapper:
             }
             history.append(epoch_stats)
             if log_every > 0 and ((epoch + 1) % log_every == 0 or epoch == 0 or epoch + 1 == num_epochs):
-                self._log(
-                    "epoch_summary epoch=%d/%d loss=%.6e loss_x=%.6e loss_adj=%.6e duration=%.3fs",
-                    epoch + 1,
-                    num_epochs,
-                    epoch_stats["loss"],
-                    epoch_stats["loss_x"],
-                    epoch_stats["loss_adj"],
-                    time.perf_counter() - epoch_started_at,
+                print(
+                    f"[GruM:{self.dataset_name}] epoch {epoch + 1}/{num_epochs} "
+                    f"loss={epoch_stats['loss']:.4e} x={epoch_stats['loss_x']:.4e} "
+                    f"adj={epoch_stats['loss_adj']:.4e}"
                 )
 
         metadata = self._metadata(train_split, val_split, test_split, config)
@@ -501,11 +434,8 @@ class GruMWrapper:
         self._train_node_counts = metadata["node_counts"]
         self._train_graphs = train_split
         self._ema_copied_for_sampling = False
-        self._log("train_end checkpoint_path=%s duration=%.3fs", self.checkpoint_path, time.perf_counter() - started_at)
 
     def sample(self, num_graphs: int, seed: int = 0, progress_callback=None) -> List[nx.Graph]:
-        started_at = time.perf_counter()
-        self._log("sample_start num_graphs=%d seed=%d", num_graphs, seed)
         if self._model is None or self._loaded_config is None:
             self.load()
         assert self._model is not None
@@ -518,7 +448,6 @@ class GruMWrapper:
         model.eval()
         if bool(self._cfg("use_ema_for_sampling", config.sample.use_ema)) and self._ema is not None:
             if not self._ema_copied_for_sampling:
-                self._log("copying_ema_to_model_for_sampling")
                 self._ema.copy_to(model.parameters())
                 self._ema_copied_for_sampling = True
 
@@ -528,27 +457,13 @@ class GruMWrapper:
         graphs: List[nx.Graph] = []
 
         while len(graphs) < int(num_graphs):
-            batch_started_at = time.perf_counter()
             current_bs = min(batch_size, int(num_graphs) - len(graphs))
-            batch_index = len(graphs) // batch_size
-            if batch_index % self.log_sample_every_n_batches == 0:
-                self._log("sample_batch_start batch=%d current_bs=%d generated=%d", batch_index + 1, current_bs, len(graphs))
             masks = self._sample_node_masks(current_bs, max_node_num, seed + len(graphs)).to(self._device())
             x, adj = self._sample_batch(model, config, masks, feature_dim)
             before = len(graphs)
             graphs.extend(self._adjs_to_graphs(adj, masks))
             update_progress(progress_callback, min(len(graphs), num_graphs) - min(before, num_graphs))
-            if batch_index % self.log_sample_every_n_batches == 0:
-                self._log(
-                    "sample_batch_end batch=%d generated_batch=%d generated_total=%d duration=%.3fs",
-                    batch_index + 1,
-                    len(graphs) - before,
-                    len(graphs),
-                    time.perf_counter() - batch_started_at,
-                )
-        result = graphs[:num_graphs]
-        self._log("sample_end returned=%d duration=%.3fs", len(result), time.perf_counter() - started_at)
-        return result
+        return graphs[:num_graphs]
 
     # ------------------------------------------------------------------
     # Upstream import and config helpers
@@ -571,12 +486,9 @@ class GruMWrapper:
 
     def _import_modules(self) -> _GruMModules:
         if self._modules is not None:
-            self._log("GruM modules already imported")
             return self._modules
         if not self.project_root.exists():
             raise FileNotFoundError(f"GruM_2D not found: {self.project_root}")
-        started_at = time.perf_counter()
-        self._log("importing GruM modules project_root=%s", self.project_root)
         with _isolated_upstream_import(self.project_root):
             transformer_mod = importlib.import_module("models.transformer")
             mix_mod = importlib.import_module("mix")
@@ -593,7 +505,6 @@ class GruMWrapper:
             graph_utils_mod=graph_utils_mod,
             node_features_mod=node_features_mod,
         )
-        self._log("imported GruM modules duration=%.3fs", time.perf_counter() - started_at)
         return self._modules
 
     def _patch_node_features(self, node_features_mod: Any) -> None:
@@ -1170,15 +1081,7 @@ class GruMWrapper:
         value = self.config.get(key, default)
         return default if value is None else value
 
-    def _log(self, message: str, *args: Any) -> None:
-        if getattr(self, "detailed_logging", False):
-            LOGGER.info("GruMWrapper " + message, *args)
-
-    def _count_parameters(self, model: torch.nn.Module) -> int:
-        return int(sum(p.numel() for p in model.parameters()))
-
     def _set_seed(self, seed: int) -> None:
-        self._log("setting_seed seed=%d", seed)
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)

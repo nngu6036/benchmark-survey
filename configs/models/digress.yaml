@@ -19,15 +19,6 @@ learning_rate: 0.0002
 num_workers: 0
 gpus: 0
 
-# Detailed wrapper logging. This logs config resolution, split conversion,
-# DiGress component construction, every Lightning train batch by default,
-# sampling batches, timings, and parameter shapes/counts.
-detailed_logging: true
-log_config: true
-log_train_every_n_steps: 1
-log_sample_every_n_batches: 1
-log_graph_details: false
-
 # DiGress samples using all model.diffusion_steps. `sampling.num_steps` is kept
 # as metadata for benchmark consistency; use model_overrides.diffusion_steps
 # before training if you want to change DiGress's actual number of diffusion steps.

@@ -8,7 +8,6 @@ import os
 import pickle
 import random
 import sys
-import time
 import types
 from pathlib import Path
 from typing import Any, Iterable
@@ -64,7 +63,6 @@ except ModuleNotFoundError:  # pragma: no cover
 
 try:
     from empirical_comparison.models.base import BaseGenerator
-    from empirical_comparison.utils.logging import get_logger
     from empirical_comparison.utils.progress import update_progress
 except Exception:  # pragma: no cover
     class BaseGenerator:  # type: ignore[no-redef]
@@ -84,10 +82,7 @@ except Exception:  # pragma: no cover
             progress_callback(int(amount))
 
 
-try:
-    LOGGER = get_logger(__name__)  # type: ignore[name-defined]
-except NameError:  # pragma: no cover
-    LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger(__name__)
 
 
 class EDPGNNWrapper(BaseGenerator):
@@ -156,18 +151,6 @@ class EDPGNNWrapper(BaseGenerator):
         self.eval_graphs: list[nx.Graph] = []
         self.feature_dim = 1
         self._shadowed_modules: dict[str, Any] = {}
-        self.detailed_logging = bool(config.get("detailed_logging", True))
-        self.log_train_every_n_steps = max(1, int(config.get("log_train_every_n_steps", 1)))
-        self.log_sample_every_n_batches = max(1, int(config.get("log_sample_every_n_batches", 1)))
-        self._log(
-            "initialized dataset=%s device=%s repo_root=%s checkpoint_path=%s preserve_isolated_nodes=%s feature_normalization=%s",
-            self.dataset_name,
-            self.device,
-            self.repo_root,
-            self.checkpoint_path,
-            self.preserve_isolated_nodes,
-            self.feature_normalization,
-        )
 
     @property
     def name(self) -> str:
@@ -201,7 +184,6 @@ class EDPGNNWrapper(BaseGenerator):
         return name.replace("/", "_").replace("\\", "_").replace(" ", "_")
 
     def _ensure_repo_importable(self) -> None:
-        self._log("checking EDP-GNN repo_root=%s", self.repo_root)
         if not (self.repo_root / "train.py").exists() or not (self.repo_root / "utils").is_dir():
             raise FileNotFoundError(
                 f"EDP-GNN repository not found at {self.repo_root}. "
@@ -247,12 +229,9 @@ class EDPGNNWrapper(BaseGenerator):
 
     def _import_modules(self) -> None:
         if self.repo_loaded:
-            self._log("EDP-GNN modules already imported")
             return
-        started_at = time.perf_counter()
         self._require_torch()
         self._ensure_repo_importable()
-        self._log("importing EDP-GNN modules")
 
         # EDP-GNN uses absolute top-level imports. Remove modules imported by
         # other wrappers before importing this repository's modules.
@@ -270,7 +249,6 @@ class EDPGNNWrapper(BaseGenerator):
                 "such as torch, scipy, PyYAML, and set EDP_GNN_REPO correctly."
             ) from exc
         self.repo_loaded = True
-        self._log("imported EDP-GNN modules duration=%.3fs", time.perf_counter() - started_at)
 
     # ------------------------------------------------------------------
     # Dataset conversion
@@ -309,13 +287,6 @@ class EDPGNNWrapper(BaseGenerator):
         val_graphs: Iterable[nx.Graph] | None = None,
         test_graphs: Iterable[nx.Graph] | None = None,
     ) -> tuple[list[nx.Graph], list[nx.Graph]]:
-        started_at = time.perf_counter()
-        self._log(
-            "prepare_graph_lists train_count=%d val_count=%s test_count=%s",
-            len(train_graphs or []),
-            None if val_graphs is None else len(val_graphs),
-            None if test_graphs is None else len(test_graphs),
-        )
         train = [self._normalize_graph(g) for g in train_graphs]
         val = [self._normalize_graph(g) for g in (val_graphs or [])]
         test = [self._normalize_graph(g) for g in (test_graphs or [])]
@@ -325,15 +296,6 @@ class EDPGNNWrapper(BaseGenerator):
         self.feature_dim = self._infer_feature_dim(train + eval_graphs)
         self.template_graphs = [g.copy() for g in train]
         self.eval_graphs = [g.copy() for g in eval_graphs]
-        self._log(
-            "prepared_graph_lists train=%d eval=%d feature_dim=%d nodes_min=%d nodes_max=%d duration=%.3fs",
-            len(train),
-            len(eval_graphs),
-            self.feature_dim,
-            min(g.number_of_nodes() for g in train + eval_graphs),
-            max(g.number_of_nodes() for g in train + eval_graphs),
-            time.perf_counter() - started_at,
-        )
         return train, eval_graphs
 
     def _infer_feature_dim(self, graphs: list[nx.Graph]) -> int:
@@ -397,13 +359,11 @@ class EDPGNNWrapper(BaseGenerator):
             else:
                 max_nodes = max(g.number_of_nodes() for g in graphs)
         adjs, xs, flags = zip(*(self._graph_to_arrays(g, int(max_nodes)) for g in graphs))
-        tensors = (
+        return (
             torch.tensor(np.stack(adjs), dtype=torch.float32),
             torch.tensor(np.stack(xs), dtype=torch.float32),
             torch.tensor(np.stack(flags), dtype=torch.float32),
         )
-        self._log("graphs_to_tensors count=%d adj_shape=%s x_shape=%s flags_shape=%s", len(graphs), tuple(tensors[0].shape), tuple(tensors[1].shape), tuple(tensors[2].shape))
-        return tensors
 
     def _graphs_to_dataloader(self, graphs: list[nx.Graph], batch_size: int, shuffle: bool) -> Any:
         from torch.utils.data import DataLoader, TensorDataset
@@ -418,8 +378,6 @@ class EDPGNNWrapper(BaseGenerator):
 
     def _materialize_dataset(self, train_graphs: list[nx.Graph], eval_graphs: list[nx.Graph]) -> None:
         """Write an upstream-compatible data file for provenance/debugging."""
-        started_at = time.perf_counter()
-        self._log("materialize_dataset data_dir=%s train=%d eval=%d", self._data_dir(), len(train_graphs), len(eval_graphs))
         self._data_dir().mkdir(parents=True, exist_ok=True)
         graph_list = [g.copy() for g in eval_graphs] + [g.copy() for g in train_graphs]
         prefix = self._data_dir() / self.dataset_name
@@ -439,7 +397,6 @@ class EDPGNNWrapper(BaseGenerator):
         }
         with open(str(prefix) + ".txt", "w", encoding="utf-8") as handle:
             handle.write(json.dumps(meta, indent=2))
-        self._log("materialize_dataset_end prefix=%s duration=%.3fs", prefix, time.perf_counter() - started_at)
 
     # ------------------------------------------------------------------
     # Config construction
@@ -458,7 +415,6 @@ class EDPGNNWrapper(BaseGenerator):
         return current
 
     def _build_config(self, train_graphs: list[nx.Graph], eval_graphs: list[nx.Graph]) -> Any:
-        started_at = time.perf_counter()
         all_graphs = train_graphs + eval_graphs
         observed_max_nodes = max(g.number_of_nodes() for g in all_graphs)
         max_nodes = int(self.config.get("max_node_num") or self._nested_get("dataset", "max_node_num", default=observed_max_nodes))
@@ -542,23 +498,12 @@ class EDPGNNWrapper(BaseGenerator):
             }
         )
         cfg.dev = self.device
-        self._log(
-            "built_config max_node_num=%d batch_size=%d eval_batch_size=%d epochs=%d lr=%.6g duration=%.3fs",
-            int(cfg.dataset.max_node_num),
-            int(cfg.train.batch_size),
-            int(cfg.test.batch_size),
-            int(cfg.train.max_epoch),
-            float(cfg.train.lr_init),
-            time.perf_counter() - started_at,
-        )
         return cfg
 
     # ------------------------------------------------------------------
     # Training / loading
     # ------------------------------------------------------------------
     def load(self) -> None:
-        started_at = time.perf_counter()
-        self._log("load_start checkpoint_path=%s", self.checkpoint_path)
         self._import_modules()
         if not self.checkpoint_path.exists():
             raise FileNotFoundError(
@@ -582,16 +527,8 @@ class EDPGNNWrapper(BaseGenerator):
             self.model.to(self.device)
             self.model.eval()
             self.mcmc_sampler = get_mc_sampler(self.edp_config)
-        self._log("load_end feature_dim=%d templates=%d duration=%.3fs", self.feature_dim, len(self.template_graphs), time.perf_counter() - started_at)
 
     def train(self, train_graphs, val_graphs=None, test_graphs=None) -> None:
-        started_at = time.perf_counter()
-        self._log(
-            "train_start train_count=%d val_count=%s test_count=%s",
-            len(train_graphs or []),
-            None if val_graphs is None else len(val_graphs),
-            None if test_graphs is None else len(test_graphs),
-        )
         self._import_modules()
         train_list, eval_list = self._prepare_graph_lists(train_graphs, val_graphs, test_graphs)
         self._materialize_dataset(train_list, eval_list)
@@ -603,7 +540,6 @@ class EDPGNNWrapper(BaseGenerator):
             get_score_model = self.mods["loading_utils"].get_score_model
             self.mcmc_sampler = get_mc_sampler(self.edp_config)
             self.model = get_score_model(self.edp_config, dev=self.device)
-            self._log("model_built parameters=%d", self._count_parameters(self.model))
             optimizer = torch.optim.Adam(
                 self.model.parameters(),
                 lr=float(self.edp_config.train.lr_init),
@@ -624,7 +560,6 @@ class EDPGNNWrapper(BaseGenerator):
             self._fit_score_model(optimizer, train_dl, eval_dl)
 
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        self._log("saving_checkpoint path=%s", self.checkpoint_path)
         payload = {
             "model_state": self.model.state_dict(),
             "config": self._to_plain_dict(self.edp_config),
@@ -638,7 +573,6 @@ class EDPGNNWrapper(BaseGenerator):
         }
         torch.save(payload, self.checkpoint_path)
         self.model.eval()
-        self._log("train_end checkpoint_path=%s duration=%.3fs", self.checkpoint_path, time.perf_counter() - started_at)
 
     def _fit_score_model(self, optimizer: Any, train_dl: Any, eval_dl: Any) -> None:
         assert self.model is not None and self.edp_config is not None
@@ -650,11 +584,9 @@ class EDPGNNWrapper(BaseGenerator):
         scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=float(self.edp_config.train.lr_dacey))
 
         for epoch in range(max_epoch):
-            epoch_started_at = time.perf_counter()
             self.model.train()
             train_losses: list[float] = []
-            for batch_idx, (adj_b, x_b, flags_b) in enumerate(train_dl):
-                batch_started_at = time.perf_counter()
+            for adj_b, x_b, flags_b in train_dl:
                 adj_b = adj_b.to(self.device)
                 x_b = x_b.to(self.device)
                 flags_b = flags_b.to(self.device)
@@ -665,25 +597,12 @@ class EDPGNNWrapper(BaseGenerator):
                 loss.backward()
                 optimizer.step()
                 train_losses.append(float(loss.detach().cpu().item()))
-                if batch_idx % self.log_train_every_n_steps == 0:
-                    self._log(
-                        "train_batch_end epoch=%d/%d batch=%d loss=%.6e adj_shape=%s x_shape=%s flags_shape=%s duration=%.3fs",
-                        epoch + 1,
-                        max_epoch,
-                        batch_idx + 1,
-                        float(loss.detach().cpu().item()),
-                        tuple(adj_b.shape),
-                        tuple(x_b.shape),
-                        tuple(flags_b.shape),
-                        time.perf_counter() - batch_started_at,
-                    )
             scheduler.step()
 
             eval_losses: list[float] = []
             self.model.eval()
             with torch.no_grad():
-                for eval_batch_idx, (adj_b, x_b, flags_b) in enumerate(eval_dl):
-                    batch_started_at = time.perf_counter()
+                for adj_b, x_b, flags_b in eval_dl:
                     adj_b = adj_b.to(self.device)
                     x_b = x_b.to(self.device)
                     flags_b = flags_b.to(self.device)
@@ -691,26 +610,16 @@ class EDPGNNWrapper(BaseGenerator):
                     score = self.model(x=x_rep, adjs=noise_adj_b, node_flags=flags_rep)
                     loss, _ = self._loss_func(score.chunk(len(sigma_list), dim=0), grad_log_q_noise_list, sigma_list)
                     eval_losses.append(float(loss.detach().cpu().item()))
-                    if eval_batch_idx % self.log_train_every_n_steps == 0:
-                        self._log(
-                            "eval_batch_end epoch=%d/%d batch=%d loss=%.6e duration=%.3fs",
-                            epoch + 1,
-                            max_epoch,
-                            eval_batch_idx + 1,
-                            float(loss.detach().cpu().item()),
-                            time.perf_counter() - batch_started_at,
-                        )
 
             if epoch % int(self.config.get("log_interval", 1)) == 0 or epoch == max_epoch - 1:
                 train_mean = float(np.mean(train_losses)) if train_losses else float("nan")
                 eval_mean = float(np.mean(eval_losses)) if eval_losses else float("nan")
                 LOGGER.info(
-                    "EDPGNNWrapper epoch_summary epoch=%04d/%04d train_loss=%.6e eval_loss=%.6e duration=%.3fs",
+                    "EDP-GNN epoch %04d/%04d train_loss=%.6e eval_loss=%.6e",
                     epoch + 1,
                     max_epoch,
                     train_mean,
                     eval_mean,
-                    time.perf_counter() - epoch_started_at,
                 )
 
     def _loss_func(self, score_list: tuple[Any, ...], grad_log_q_noise_list: list[Any], sigma_list: list[float]) -> tuple[Any, list[float]]:
@@ -742,8 +651,6 @@ class EDPGNNWrapper(BaseGenerator):
         return init_adjs, base_x, node_flags
 
     def sample(self, num_graphs: int, seed: int = 0, progress_callback=None):
-        started_at = time.perf_counter()
-        self._log("sample_start num_graphs=%d seed=%d", num_graphs, seed)
         self._import_modules()
         if self.model is None or self.mcmc_sampler is None or self.edp_config is None:
             self.load()
@@ -766,16 +673,6 @@ class EDPGNNWrapper(BaseGenerator):
         warm_up_count = 0
 
         while len(generated) < num_graphs:
-            batch_started_at = time.perf_counter()
-            batch_index = max(0, warm_up_count + len(generated) // max(1, batch_size))
-            if batch_index % self.log_sample_every_n_batches == 0:
-                self._log(
-                    "sample_batch_start batch=%d generated=%d total_batch=%d warm_up_count=%d",
-                    batch_index + 1,
-                    len(generated),
-                    total_batch,
-                    warm_up_count,
-                )
             step_size = (
                 step_size_ratio
                 * torch.tensor(sigma_list, device=self.device).repeat_interleave(batch_size, dim=0)[..., None, None]
@@ -807,14 +704,6 @@ class EDPGNNWrapper(BaseGenerator):
                     )
                 )
                 update_progress(progress_callback, min(len(generated), num_graphs) - min(before, num_graphs))
-            if batch_index % self.log_sample_every_n_batches == 0:
-                self._log(
-                    "sample_batch_end batch=%d generated_total=%d warm_up_count=%d duration=%.3fs",
-                    batch_index + 1,
-                    len(generated),
-                    warm_up_count,
-                    time.perf_counter() - batch_started_at,
-                )
 
             new_init_adjs, new_x, new_flags = self._prepare_init_batch(batch_size)
             init_adjs = torch.cat(list(sampled_chunks[1:]) + [new_init_adjs], dim=0)
@@ -830,7 +719,6 @@ class EDPGNNWrapper(BaseGenerator):
             nx.set_node_attributes(graph, features, "feature")
             nx.set_node_attributes(graph, features, "feats")
             result.append(graph)
-        self._log("sample_end returned=%d duration=%.3fs", len(result), time.perf_counter() - started_at)
         return result
 
     def _adjs_to_graphs(self, adjs: np.ndarray, node_flags: np.ndarray | None = None) -> list[nx.Graph]:
@@ -907,21 +795,11 @@ class EDPGNNWrapper(BaseGenerator):
         return obj
 
     def _seed_everything(self, seed: int) -> None:
-        self._log("setting_seed seed=%d", seed)
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
-
-    def _log(self, message: str, *args: Any) -> None:
-        if getattr(self, "detailed_logging", False):
-            LOGGER.info("EDPGNNWrapper " + message, *args)
-
-    def _count_parameters(self, model: Any) -> int:
-        if model is None or not hasattr(model, "parameters"):
-            return 0
-        return int(sum(p.numel() for p in model.parameters()))
 
     @contextlib.contextmanager
     def _legacy_torch_load(self):

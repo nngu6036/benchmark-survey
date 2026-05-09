@@ -19,11 +19,6 @@ clip_grad: null
 val_every: 10
 nodes_dist_source: train  # train is benchmark-fair; upstream ConStruct used all splits.
 
-# Detailed wrapper logging.
-detailed_logging: true
-log_train_every_n_steps: 1
-log_sample_every_n_batches: 1
-
 # Discrete diffusion
 transition: absorbing_edges
 diffusion_steps: 500

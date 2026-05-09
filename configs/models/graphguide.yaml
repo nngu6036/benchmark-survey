@@ -32,11 +32,6 @@ t_limit: 1000
 sample_batch_size: 32
 verbose_sampling: false
 
-# Detailed wrapper logging.
-detailed_logging: true
-log_train_every_n_steps: 1
-log_sample_every_n_batches: 1
-
 # Upstream GraphGUIDE model backbone.
 # Options: gat, gin, digress.
 model_type: gat

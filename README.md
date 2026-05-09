@@ -34,6 +34,11 @@ PYTHONPATH=src python scripts/prepare_data.py \
   --download-root outputs/raw_datasets/qm9 \
   --force
 
+# QM9 uses PyG's official preprocessed archive by default. This bypasses
+# RDKit raw-SDF parsing, which can fail in some RDKit/PyG environments when
+# a raw molecule is parsed as None. Set prefer_preprocessed: false only if you
+# specifically need PyG to rebuild QM9 from the raw SDF file.
+
 # ZINC: default config uses PyG's 12k subset and official train/val/test splits.
 # Set subset: false in configs/datasets/zinc.yaml for the full ZINC dataset.
 PYTHONPATH=src python scripts/prepare_data.py \

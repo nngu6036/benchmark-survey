@@ -8,6 +8,7 @@ import math
 import os
 import random
 import sys
+import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +20,11 @@ import torch
 import torch.nn.functional as F
 
 from empirical_comparison.models.base import BaseGenerator
+from empirical_comparison.utils.logging import get_logger
 from empirical_comparison.utils.progress import update_progress
+
+
+LOGGER = get_logger(__name__)
 
 
 @dataclass
@@ -101,6 +106,18 @@ class DisCoWrapper(BaseGenerator):
         self.n_node_distribution: torch.distributions.Categorical | None = None
         self.meta: _DisCoDatasetMeta | None = None
         self.best_metric: float | None = None
+        self.detailed_logging = bool(config.get("detailed_logging", True))
+        self.log_train_every_n_steps = max(1, int(config.get("log_train_every_n_steps", 1)))
+        self.log_sample_every_n_batches = max(1, int(config.get("log_sample_every_n_batches", 1)))
+        self._log(
+            "initialized dataset=%s device=%s repo_root=%s checkpoint_path=%s data_root=%s run_root=%s",
+            self.dataset,
+            self.device,
+            self.repo_root,
+            self.checkpoint_path,
+            self.data_root,
+            self.run_root,
+        )
 
     @property
     def name(self) -> str:
@@ -139,6 +156,7 @@ class DisCoWrapper(BaseGenerator):
         return repo_root
 
     def _validate_repo_root(self) -> None:
+        self._log("checking DisCo repo_root=%s", self.repo_root)
         required = [
             "forward_diff.py",
             "sampling.py",
@@ -420,7 +438,10 @@ class DisCoWrapper(BaseGenerator):
 
     def _import_modules(self) -> None:
         if self.repo_loaded:
+            self._log("DisCo modules already imported")
             return
+        started_at = time.perf_counter()
+        self._log("importing DisCo modules")
         self._validate_repo_root()
 
         prefix = self._unique_prefix()
@@ -441,6 +462,7 @@ class DisCoWrapper(BaseGenerator):
             self.mods["aux"] = aux_mod
 
         self.repo_loaded = True
+        self._log("imported DisCo modules duration=%.3fs", time.perf_counter() - started_at)
 
     # ------------------------------------------------------------------
     # Dense graph conversion and dataset statistics
@@ -461,9 +483,19 @@ class DisCoWrapper(BaseGenerator):
         return h
 
     def _prepare_graphs(self, graphs: Iterable[nx.Graph]) -> list[nx.Graph]:
+        started_at = time.perf_counter()
         cleaned = [self._clean_graph(g) for g in graphs]
         if not cleaned:
             raise ValueError("DisCoWrapper received an empty graph list.")
+        self._log(
+            "prepared_graphs count=%d nodes_min=%d nodes_max=%d edges_min=%d edges_max=%d duration=%.3fs",
+            len(cleaned),
+            min(g.number_of_nodes() for g in cleaned),
+            max(g.number_of_nodes() for g in cleaned),
+            min(g.number_of_edges() for g in cleaned),
+            max(g.number_of_edges() for g in cleaned),
+            time.perf_counter() - started_at,
+        )
         return cleaned
 
     @staticmethod
@@ -557,7 +589,10 @@ class DisCoWrapper(BaseGenerator):
         meta: _DisCoDatasetMeta,
     ) -> None:
         if not bool(self.config.get("save_provenance_dataset", True)):
+            self._log("write_provenance_skip save_provenance_dataset=false")
             return
+        started_at = time.perf_counter()
+        self._log("writing_provenance data_root=%s train=%d val=%s test=%s", self.data_root, len(train_graphs), None if val_graphs is None else len(val_graphs), None if test_graphs is None else len(test_graphs))
         self.data_root.mkdir(parents=True, exist_ok=True)
 
         def to_adj_list(graphs: list[nx.Graph] | None) -> list[torch.Tensor]:
@@ -582,6 +617,7 @@ class DisCoWrapper(BaseGenerator):
         torch.save(payload, self.data_root / "benchmark_splits.pt")
         with open(self.data_root / "metadata.json", "w", encoding="utf-8") as f:
             json.dump(meta.__dict__, f, indent=2)
+        self._log("wrote_provenance duration=%.3fs", time.perf_counter() - started_at)
 
     # ------------------------------------------------------------------
     # Model construction
@@ -600,6 +636,7 @@ class DisCoWrapper(BaseGenerator):
         val_graphs: list[nx.Graph] | None = None,
         test_graphs: list[nx.Graph] | None = None,
     ) -> _DisCoDatasetMeta:
+        started_at = time.perf_counter()
         self._import_modules()
         all_graphs = train_graphs + (val_graphs or []) + (test_graphs or [])
         max_n_nodes_all = max(g.number_of_nodes() for g in all_graphs)
@@ -637,7 +674,7 @@ class DisCoWrapper(BaseGenerator):
         backbone = str(self.config.get("backbone", "GT"))
         hidden_mlp_dims, hidden_dims = self._hidden_dims(backbone=backbone, n_dim=n_dim)
 
-        return _DisCoDatasetMeta(
+        meta = _DisCoDatasetMeta(
             dataset=self.dataset,
             n_node_type=n_node_type,
             n_edge_type=n_edge_type,
@@ -654,6 +691,16 @@ class DisCoWrapper(BaseGenerator):
             n_dim=n_dim,
             aux_features=aux_flags,
         )
+        self._log(
+            "built_meta max_n_nodes=%d n_node_type=%d n_edge_type=%d input_dims=%s output_dims=%s duration=%.3fs",
+            meta.max_n_nodes,
+            meta.n_node_type,
+            meta.n_edge_type,
+            meta.input_dims,
+            meta.output_dims,
+            time.perf_counter() - started_at,
+        )
+        return meta
 
     def _hidden_dims(self, *, backbone: str, n_dim: int) -> tuple[dict[str, int], dict[str, int]]:
         if backbone == "GT":
@@ -685,6 +732,8 @@ class DisCoWrapper(BaseGenerator):
         raise ValueError(f"Unsupported DisCo backbone={backbone!r}. Expected 'GT' or 'MPNN'.")
 
     def _build_components(self, meta: _DisCoDatasetMeta) -> None:
+        started_at = time.perf_counter()
+        self._log("building_components backbone=%s sampling_steps=%s", meta.backbone, self.config.get("sampling_steps", self.config.get("sampling", {}).get("num_steps", 50)))
         self._import_modules()
         self.meta = meta
         ForwardDiffusion = self.mods["forward_diff"].ForwardDiffusion
@@ -769,14 +818,17 @@ class DisCoWrapper(BaseGenerator):
             raise ValueError("Invalid DisCo node-count distribution: all probabilities are zero.")
         probs = probs / probs.sum()
         self.n_node_distribution = torch.distributions.Categorical(probs=probs)
+        self._log("built_components parameters=%d duration=%.3fs", self._count_parameters(self.model), time.perf_counter() - started_at)
 
     # ------------------------------------------------------------------
     # Training / validation / checkpointing
     # ------------------------------------------------------------------
-    def _run_epoch(self, graphs: list[nx.Graph], *, train: bool) -> tuple[float, float]:
+    def _run_epoch(self, graphs: list[nx.Graph], *, train: bool, epoch: int | None = None) -> tuple[float, float]:
         if self.model is None or self.optimizer is None or self.diffuser is None or self.add_auxiliary_feature is None:
             raise RuntimeError("DisCo components have not been built.")
         self.model.train(train)
+        started_at = time.perf_counter()
+        phase = "train" if train else "val"
         min_time = float(self.config.get("min_time", 0.01))
         edge_loss_weight = float(self.config.get("edge_loss_weight", 5.0))
         include_node_feature = bool(getattr(self.diffuser, "diffuse_node", False))
@@ -787,7 +839,8 @@ class DisCoWrapper(BaseGenerator):
         iterator = self._iter_batches(graphs, shuffle=train and bool(self.config.get("shuffle", True)))
         context = contextlib.nullcontext() if train else torch.no_grad()
         with context:
-            for batch_graphs in iterator:
+            for batch_idx, batch_graphs in enumerate(iterator):
+                batch_started_at = time.perf_counter()
                 X_0, E_0, node_mask = self._graphs_to_dense_batch(batch_graphs)
                 ts = torch.rand((E_0.shape[0],), device=self.device) * (1.0 - min_time) + min_time
 
@@ -829,10 +882,26 @@ class DisCoWrapper(BaseGenerator):
                 total_loss += float(loss.item())
                 total_acc += edge_acc
                 batches += 1
+                if batch_idx % self.log_train_every_n_steps == 0:
+                    self._log(
+                        "%s_batch_end epoch=%s batch=%d graphs=%d X_shape=%s E_shape=%s loss=%.6e edge_acc=%.6f duration=%.3fs",
+                        phase,
+                        epoch,
+                        batch_idx + 1,
+                        len(batch_graphs),
+                        tuple(X_0.shape),
+                        tuple(E_0.shape),
+                        float(loss.item()),
+                        edge_acc,
+                        time.perf_counter() - batch_started_at,
+                    )
 
         if batches == 0:
             return float("nan"), float("nan")
-        return total_loss / batches, total_acc / batches
+        mean_loss = total_loss / batches
+        mean_acc = total_acc / batches
+        self._log("%s_epoch_end epoch=%s loss=%.6e edge_acc=%.6f batches=%d duration=%.3fs", phase, epoch, mean_loss, mean_acc, batches, time.perf_counter() - started_at)
+        return mean_loss, mean_acc
 
     def _checkpoint_payload(self, epoch: int, train_loss: float, val_loss: float | None) -> dict[str, Any]:
         if self.model is None or self.meta is None:
@@ -850,9 +919,18 @@ class DisCoWrapper(BaseGenerator):
 
     def _save_checkpoint(self, epoch: int, train_loss: float, val_loss: float | None) -> None:
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        self._log("saving_checkpoint path=%s epoch=%d train_loss=%.6e val_loss=%s", self.checkpoint_path, epoch, train_loss, val_loss)
         torch.save(self._checkpoint_payload(epoch, train_loss, val_loss), self.checkpoint_path)
 
     def train(self, train_graphs, val_graphs=None, test_graphs=None) -> None:
+        started_at = time.perf_counter()
+        self._log(
+            "train_start train_count=%d val_count=%s test_count=%s seed=%d",
+            len(train_graphs or []),
+            None if val_graphs is None else len(val_graphs),
+            None if test_graphs is None else len(test_graphs),
+            self.seed,
+        )
         random.seed(self.seed)
         np.random.seed(self.seed)
         torch.manual_seed(self.seed)
@@ -873,11 +951,11 @@ class DisCoWrapper(BaseGenerator):
         best_epoch = 0
 
         for epoch in range(1, num_epochs + 1):
-            train_loss, train_edge_acc = self._run_epoch(train_clean, train=True)
+            train_loss, train_edge_acc = self._run_epoch(train_clean, train=True, epoch=epoch)
             val_loss = None
             val_edge_acc = None
             if val_clean:
-                val_loss, val_edge_acc = self._run_epoch(val_clean, train=False)
+                val_loss, val_edge_acc = self._run_epoch(val_clean, train=False, epoch=epoch)
                 score = val_loss
             else:
                 score = train_loss
@@ -891,14 +969,16 @@ class DisCoWrapper(BaseGenerator):
                 msg = f"[DisCo] epoch {epoch}/{num_epochs} train_loss={train_loss:.4f} train_edge_acc={train_edge_acc:.4f}"
                 if val_loss is not None:
                     msg += f" val_loss={val_loss:.4f} val_edge_acc={val_edge_acc:.4f}"
-                print(msg)
+                self._log("epoch_summary %s", msg)
 
         self.best_metric = best_score
         if self.checkpoint_path.exists():
             self.load()
-        print(f"[DisCo] best_epoch={best_epoch} best_loss={best_score:.4f} checkpoint={self.checkpoint_path}")
+        self._log("train_end best_epoch=%d best_loss=%.6e checkpoint=%s duration=%.3fs", best_epoch, best_score, self.checkpoint_path, time.perf_counter() - started_at)
 
     def load(self) -> None:
+        started_at = time.perf_counter()
+        self._log("load_start checkpoint_path=%s", self.checkpoint_path)
         if not self.checkpoint_path.exists():
             raise FileNotFoundError(
                 f"DisCo checkpoint not found: {self.checkpoint_path}. Run scripts/train_model.py first or set checkpoint_path."
@@ -918,12 +998,15 @@ class DisCoWrapper(BaseGenerator):
             with contextlib.suppress(Exception):
                 self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         self.model.eval()
+        self._log("load_end epoch=%s dataset=%s duration=%.3fs", ckpt.get("epoch"), meta.dataset, time.perf_counter() - started_at)
 
     # ------------------------------------------------------------------
     # Sampling
     # ------------------------------------------------------------------
     @torch.no_grad()
     def sample(self, num_graphs: int, seed: int = 0, progress_callback=None):
+        started_at = time.perf_counter()
+        self._log("sample_start num_graphs=%d seed=%d", num_graphs, seed)
         if self.model is None:
             self.load()
         if self.model is None or self.sampler is None or self.diffuser is None or self.n_node_distribution is None:
@@ -941,7 +1024,11 @@ class DisCoWrapper(BaseGenerator):
 
         remaining = int(num_graphs)
         while remaining > 0:
+            batch_started_at = time.perf_counter()
             batch = min(sample_batch_size, remaining)
+            batch_index = (int(num_graphs) - remaining) // sample_batch_size
+            if batch_index % self.log_sample_every_n_batches == 0:
+                self._log("sample_batch_start batch=%d batch_size=%d remaining=%d", batch_index + 1, batch, remaining)
             n_node = self.n_node_distribution.sample((batch,)).to(self.device)
             # Guard against a degenerate distribution with zero-size samples.
             if torch.any(n_node <= 0):
@@ -969,5 +1056,24 @@ class DisCoWrapper(BaseGenerator):
                 graphs.append(graph)
             update_progress(progress_callback, min(len(graphs), num_graphs) - min(before, num_graphs))
             remaining -= batch
+            if batch_index % self.log_sample_every_n_batches == 0:
+                self._log(
+                    "sample_batch_end batch=%d generated_batch=%d generated_total=%d remaining=%d duration=%.3fs",
+                    batch_index + 1,
+                    len(graphs) - before,
+                    len(graphs),
+                    remaining,
+                    time.perf_counter() - batch_started_at,
+                )
 
+        self._log("sample_end returned=%d duration=%.3fs", len(graphs), time.perf_counter() - started_at)
         return graphs
+
+    def _log(self, message: str, *args: Any) -> None:
+        if self.detailed_logging:
+            LOGGER.info("DisCoWrapper " + message, *args)
+
+    def _count_parameters(self, model: torch.nn.Module | None) -> int:
+        if model is None:
+            return 0
+        return int(sum(p.numel() for p in model.parameters()))

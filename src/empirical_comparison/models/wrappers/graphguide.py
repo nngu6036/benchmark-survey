@@ -16,7 +16,11 @@ import numpy as np
 import torch
 
 from empirical_comparison.models.base import BaseGenerator
+from empirical_comparison.utils.logging import get_logger
 from empirical_comparison.utils.progress import update_progress
+
+
+LOGGER = get_logger(__name__)
 
 
 class GraphGUIDEWrapper(BaseGenerator):
@@ -84,6 +88,9 @@ class GraphGUIDEWrapper(BaseGenerator):
         self.template_strategy = str(config.get("template_strategy", "random")).lower()
         self.max_templates = int(config.get("max_templates", 2048))
         self.verbose_sampling = bool(config.get("verbose_sampling", False))
+        self.detailed_logging = bool(config.get("detailed_logging", True))
+        self.log_train_every_n_steps = max(1, int(config.get("log_train_every_n_steps", 1)))
+        self.log_sample_every_n_batches = max(1, int(config.get("log_sample_every_n_batches", 1)))
 
         if config.get("torch_num_threads") is not None:
             torch.set_num_threads(int(config["torch_num_threads"]))
@@ -104,6 +111,17 @@ class GraphGUIDEWrapper(BaseGenerator):
         self.graph_size_counts: dict[int, int] = {}
         self.input_dim: int | None = None
         self.train_metadata: dict[str, Any] = {}
+        self._log(
+            "initialized dataset=%s device=%s repo_root=%s checkpoint_path=%s data_root=%s run_root=%s model_type=%s diffuser_type=%s",
+            self.dataset,
+            self.device,
+            self.repo_root,
+            self.checkpoint_path,
+            self.data_root,
+            self.run_root,
+            self.model_type,
+            self.diffuser_type,
+        )
 
     @property
     def name(self) -> str:
@@ -130,6 +148,7 @@ class GraphGUIDEWrapper(BaseGenerator):
         return repo_root
 
     def _ensure_repo_importable(self) -> None:
+        self._log("checking GraphGUIDE repo_src=%s", self.repo_src)
         if not self.repo_src.exists():
             raise FileNotFoundError(
                 f"GraphGUIDE src directory not found at {self.repo_src}. "
@@ -140,7 +159,9 @@ class GraphGUIDEWrapper(BaseGenerator):
 
     def _import_graphguide_modules(self) -> None:
         if self.gg_loaded:
+            self._log("GraphGUIDE modules already imported")
             return
+        started_at = time.perf_counter()
         self._ensure_repo_importable()
         try:
             from torch_geometric.loader import DataLoader as PyGDataLoader
@@ -167,6 +188,7 @@ class GraphGUIDEWrapper(BaseGenerator):
         self.pyg_sort_edge_index = sort_edge_index
         self._patch_upstream_device()
         self.gg_loaded = True
+        self._log("imported GraphGUIDE modules duration=%.3fs", time.perf_counter() - started_at)
 
     def _patch_upstream_device(self) -> None:
         # The GraphGUIDE repo sets module-level DEVICE at import time based only
@@ -187,6 +209,7 @@ class GraphGUIDEWrapper(BaseGenerator):
                     pass
 
     def _set_seed(self, seed: int) -> None:
+        self._log("setting_seed seed=%d", seed)
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -254,13 +277,17 @@ class GraphGUIDEWrapper(BaseGenerator):
 
     def _make_loader(self, graphs: list[nx.Graph], shuffle: bool):
         self._import_graphguide_modules()
+        started_at = time.perf_counter()
+        self._log("make_loader graph_count=%d batch_size=%d shuffle=%s", len(graphs), self.batch_size, shuffle)
         pyg_graphs = [self._to_pyg_data(g) for g in graphs]
-        return self.pyg_DataLoader(
+        loader = self.pyg_DataLoader(
             pyg_graphs,
             batch_size=self.batch_size,
             shuffle=shuffle,
             num_workers=self.num_workers,
         )
+        self._log("make_loader_end graph_count=%d duration=%.3fs", len(graphs), time.perf_counter() - started_at)
+        return loader
 
     def _model_class(self, model_type: str | None = None):
         self._import_graphguide_modules()
@@ -305,6 +332,7 @@ class GraphGUIDEWrapper(BaseGenerator):
             args = {"input_dim": int(self.input_dim), "t_limit": int(self.t_limit), **self.model_kwargs}
             args = self._filter_constructor_kwargs(cls, args)
             model = cls(**args)
+        self._log("built_model class=%s args=%s parameters=%d", cls.__name__, args, self._count_parameters(model))
         return model.to(self.device)
 
     def _build_diffuser(self, seed: int | None = None):
@@ -346,16 +374,20 @@ class GraphGUIDEWrapper(BaseGenerator):
             templates = [templates[int(i)] for i in indices]
         return templates
 
-    def _run_one_epoch(self, loader, optimizer: torch.optim.Optimizer | None) -> float:
+    def _run_one_epoch(self, loader, optimizer: torch.optim.Optimizer | None, epoch: int | None = None) -> float:
         is_train = optimizer is not None
         self.model.train(is_train)
         losses: list[float] = []
+        phase = "train" if is_train else "val"
+        started_at = time.perf_counter()
         grad_context = contextlib.nullcontext() if is_train else torch.no_grad()
         with grad_context:
-            for data in loader:
+            for batch_idx, data in enumerate(loader):
+                batch_started_at = time.perf_counter()
                 data = data.to(self.device)
                 e0, edge_batch_inds = self.gg_graph_conversions.pyg_data_to_edge_vector(data, return_batch_inds=True)
                 if e0.numel() == 0:
+                    self._log("%s_batch_skip epoch=%s batch=%d reason=no_edges", phase, epoch, batch_idx + 1)
                     continue
 
                 graph_sizes = torch.diff(data.ptr)
@@ -387,12 +419,41 @@ class GraphGUIDEWrapper(BaseGenerator):
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad)
                     optimizer.step()
                 losses.append(float(loss.detach().cpu().item()))
+                if batch_idx % self.log_train_every_n_steps == 0:
+                    self._log(
+                        "%s_batch_end epoch=%s batch=%d graphs=%d edges=%d loss=%.6e duration=%.3fs",
+                        phase,
+                        epoch,
+                        batch_idx + 1,
+                        int(graph_sizes.shape[0]),
+                        int(e0.numel()),
+                        float(loss.detach().cpu().item()),
+                        time.perf_counter() - batch_started_at,
+                    )
+        self._log(
+            "%s_epoch_end epoch=%s mean_loss=%.6e batches=%d duration=%.3fs",
+            phase,
+            epoch,
+            float(np.mean(losses)) if losses else float("nan"),
+            len(losses),
+            time.perf_counter() - started_at,
+        )
         return float(np.mean(losses)) if losses else float("nan")
 
     def train(self, train_graphs, val_graphs=None, test_graphs=None) -> None:
+        started_at = time.perf_counter()
         train_graphs = list(train_graphs or [])
         val_graphs = list(val_graphs or [])
         test_graphs = list(test_graphs or [])
+        self._log(
+            "train_start train_count=%d val_count=%d test_count=%d seed=%d epochs=%d batch_size=%d",
+            len(train_graphs),
+            len(val_graphs),
+            len(test_graphs),
+            self.seed,
+            self.num_epochs,
+            self.batch_size,
+        )
         if not train_graphs:
             raise ValueError("GraphGUIDEWrapper.train() requires at least one training graph.")
 
@@ -401,6 +462,7 @@ class GraphGUIDEWrapper(BaseGenerator):
         self.input_dim = self._infer_input_dim(train_graphs)
         self.template_graphs = self._select_template_graphs(train_graphs)
         self.graph_size_counts = self._graph_size_counts(train_graphs)
+        self._log("prepared_templates count=%d input_dim=%d graph_size_counts=%s", len(self.template_graphs), self.input_dim, self.graph_size_counts)
 
         self.model = self._build_model()
         # Ensure non-standard models such as DiGressGNN have enough metadata for
@@ -427,10 +489,10 @@ class GraphGUIDEWrapper(BaseGenerator):
         history: list[dict[str, Any]] = []
         start = time.perf_counter()
         for epoch in range(1, self.num_epochs + 1):
-            train_loss = self._run_one_epoch(train_loader, optimizer)
+            train_loss = self._run_one_epoch(train_loader, optimizer, epoch=epoch)
             val_loss = None
             if val_loader is not None and self.val_every > 0 and (epoch % self.val_every == 0 or epoch == self.num_epochs):
-                val_loss = self._run_one_epoch(val_loader, optimizer=None)
+                val_loss = self._run_one_epoch(val_loader, optimizer=None, epoch=epoch)
             score = val_loss if val_loss is not None and np.isfinite(val_loss) else train_loss
             if np.isfinite(score) and score < best_loss:
                 best_loss = float(score)
@@ -438,9 +500,9 @@ class GraphGUIDEWrapper(BaseGenerator):
             record = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss}
             history.append(record)
             if val_loss is None:
-                print(f"[GraphGUIDE] epoch {epoch}/{self.num_epochs} train_loss={train_loss:.4f}")
+                self._log("epoch_summary epoch=%d/%d train_loss=%.6e", epoch, self.num_epochs, train_loss)
             else:
-                print(f"[GraphGUIDE] epoch {epoch}/{self.num_epochs} train_loss={train_loss:.4f} val_loss={val_loss:.4f}")
+                self._log("epoch_summary epoch=%d/%d train_loss=%.6e val_loss=%.6e", epoch, self.num_epochs, train_loss, val_loss)
 
         if best_state is not None:
             self.model.load_state_dict(best_state)
@@ -458,7 +520,7 @@ class GraphGUIDEWrapper(BaseGenerator):
         }
         self._save_checkpoint()
         self.model.eval()
-        print(f"[GraphGUIDE] saved checkpoint to {self.checkpoint_path}")
+        self._log("train_end checkpoint_path=%s best_loss=%.6e duration=%.3fs", self.checkpoint_path, best_loss, time.perf_counter() - started_at)
 
     def _write_provenance(self, train_graphs: list[nx.Graph], val_graphs: list[nx.Graph], test_graphs: list[nx.Graph]) -> None:
         payload = {
@@ -508,6 +570,8 @@ class GraphGUIDEWrapper(BaseGenerator):
         )
 
     def load(self) -> None:
+        started_at = time.perf_counter()
+        self._log("load_start checkpoint_path=%s", self.checkpoint_path)
         self._import_graphguide_modules()
         if not self.checkpoint_path.exists():
             raise FileNotFoundError(
@@ -546,6 +610,14 @@ class GraphGUIDEWrapper(BaseGenerator):
         self.train_metadata = dict(ckpt.get("train_metadata", {}))
         if not self.template_graphs:
             self.template_graphs = self._fallback_templates_from_size_counts()
+        self._log(
+            "load_end model_type=%s input_dim=%d templates=%d graph_size_counts=%s duration=%.3fs",
+            self.model_type,
+            int(self.input_dim or 0),
+            len(self.template_graphs),
+            self.graph_size_counts,
+            time.perf_counter() - started_at,
+        )
 
     @contextlib.contextmanager
     def _legacy_torch_load(self):
@@ -609,6 +681,8 @@ class GraphGUIDEWrapper(BaseGenerator):
         return batch
 
     def sample(self, num_graphs: int, seed: int = 0, progress_callback=None):
+        started_at = time.perf_counter()
+        self._log("sample_start num_graphs=%d seed=%d batch_size=%d", num_graphs, seed, self.sample_batch_size)
         if self.model is None or self.diffuser is None:
             raise RuntimeError("Call load() or train() before sample().")
         if num_graphs <= 0:
@@ -619,7 +693,11 @@ class GraphGUIDEWrapper(BaseGenerator):
         chosen = self._choose_templates(num_graphs, seed)
         generated: list[nx.Graph] = []
         for start in range(0, num_graphs, self.sample_batch_size):
+            batch_started_at = time.perf_counter()
             batch_templates = chosen[start : start + self.sample_batch_size]
+            batch_index = start // self.sample_batch_size
+            if batch_index % self.log_sample_every_n_batches == 0:
+                self._log("sample_batch_start batch=%d start=%d count=%d", batch_index + 1, start, len(batch_templates))
             initial_batch = self._prepare_initial_sample(batch_templates)
             if int(self.gg_graph_conversions.pyg_data_to_edge_vector(initial_batch).numel()) == 0:
                 samples = initial_batch
@@ -637,7 +715,24 @@ class GraphGUIDEWrapper(BaseGenerator):
             before = len(generated)
             generated.extend(self._postprocess_output_graph(g) for g in batch_graphs)
             update_progress(progress_callback, min(len(generated), num_graphs) - min(before, num_graphs))
-        return generated[:num_graphs]
+            if batch_index % self.log_sample_every_n_batches == 0:
+                self._log(
+                    "sample_batch_end batch=%d generated_batch=%d generated_total=%d duration=%.3fs",
+                    batch_index + 1,
+                    len(generated) - before,
+                    len(generated),
+                    time.perf_counter() - batch_started_at,
+                )
+        result = generated[:num_graphs]
+        self._log("sample_end returned=%d duration=%.3fs", len(result), time.perf_counter() - started_at)
+        return result
+
+    def _log(self, message: str, *args: Any) -> None:
+        if self.detailed_logging:
+            LOGGER.info("GraphGUIDEWrapper " + message, *args)
+
+    def _count_parameters(self, model: torch.nn.Module) -> int:
+        return int(sum(p.numel() for p in model.parameters()))
 
     def _postprocess_output_graph(self, graph: nx.Graph) -> nx.Graph:
         g = nx.Graph(graph)

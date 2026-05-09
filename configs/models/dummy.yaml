@@ -3,6 +3,11 @@ num_nodes: 64
 edge_prob: 0.05
 variable_size: false
 batch_size: 128
+
+# Detailed wrapper logging.
+detailed_logging: true
+log_sample_every_n_graphs: 1
+
 sampling:
   num_steps: 1
   temperature: 1.0

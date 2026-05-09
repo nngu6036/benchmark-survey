@@ -6,6 +6,7 @@ import os
 import random
 import shutil
 import sys
+import time
 import types
 import warnings
 from dataclasses import asdict, dataclass
@@ -18,7 +19,11 @@ import torch
 import torch.nn.functional as F
 
 from empirical_comparison.models.base import BaseGenerator
+from empirical_comparison.utils.logging import get_logger
 from empirical_comparison.utils.progress import update_progress
+
+
+LOGGER = get_logger(__name__)
 
 
 class _ConfigNode(types.SimpleNamespace):
@@ -474,6 +479,18 @@ class ConStructWrapper(BaseGenerator):
         self.dataset_infos: _ConStructDatasetInfos | None = None
         self.model: _DenseConStructModel | None = None
         self.projector_classes: dict[str, Any] | None = None
+        self.detailed_logging = bool(config.get("detailed_logging", True))
+        self.log_train_every_n_steps = max(1, int(config.get("log_train_every_n_steps", 1)))
+        self.log_sample_every_n_batches = max(1, int(config.get("log_sample_every_n_batches", 1)))
+        self._log(
+            "initialized dataset=%s device=%s repo_root=%s checkpoint_path=%s data_root=%s run_root=%s",
+            self.dataset,
+            self.device,
+            self.repo_root,
+            self.checkpoint_path,
+            self.data_root,
+            self.run_root,
+        )
 
     @property
     def name(self) -> str:
@@ -508,6 +525,7 @@ class ConStructWrapper(BaseGenerator):
         return repo_root
 
     def _validate_repo_root(self) -> None:
+        self._log("checking ConStruct repo_root=%s", self.repo_root)
         required = [
             "ConStruct/models/transformer_model.py",
             "ConStruct/diffusion/noise_model.py",
@@ -680,7 +698,10 @@ class ConStructWrapper(BaseGenerator):
 
     def _import_modules(self) -> None:
         if self.repo_loaded:
+            self._log("ConStruct modules already imported")
             return
+        started_at = time.perf_counter()
+        self._log("importing ConStruct modules")
         self._validate_repo_root()
         self._ensure_repo_importable()
         self._install_utils_shim()
@@ -697,6 +718,7 @@ class ConStructWrapper(BaseGenerator):
         self.mods["ExtraFeatures"] = extra_mod.ExtraFeatures
         self.mods["DummyExtraFeatures"] = extra_mod.DummyExtraFeatures
         self.repo_loaded = True
+        self._log("imported ConStruct modules duration=%.3fs", time.perf_counter() - started_at)
 
     def _import_projectors(self) -> dict[str, Any]:
         if self.projector_classes is not None:
@@ -724,6 +746,8 @@ class ConStructWrapper(BaseGenerator):
     # Dataset materialization and dense conversion
     # ------------------------------------------------------------------
     def _graphs_to_adj_arrays(self, graphs: list[nx.Graph]) -> list[dict[str, np.ndarray]]:
+        started_at = time.perf_counter()
+        self._log("converting_graphs count=%d", len(graphs))
         arrays: list[dict[str, np.ndarray]] = []
         for idx, g in enumerate(graphs):
             if g.number_of_nodes() == 0:
@@ -743,6 +767,8 @@ class ConStructWrapper(BaseGenerator):
                 E[int(u), int(v)] = edge_type
                 E[int(v), int(u)] = edge_type
             arrays.append({"X": X, "E": E})
+            self._log("converted_graph index=%d nodes=%d edges=%d", idx, g2.number_of_nodes(), g2.number_of_edges())
+        self._log("converted_graphs count=%d duration=%.3fs", len(arrays), time.perf_counter() - started_at)
         return arrays
 
     def _split_arrays_for_meta(
@@ -812,6 +838,8 @@ class ConStructWrapper(BaseGenerator):
         )
 
     def _write_provenance(self, train: list[dict[str, np.ndarray]], val: list[dict[str, np.ndarray]], test: list[dict[str, np.ndarray]], meta: _ConStructDatasetMeta) -> None:
+        started_at = time.perf_counter()
+        self._log("writing_provenance data_root=%s train=%d val=%d test=%d", self.data_root, len(train), len(val), len(test))
         self.data_root.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
@@ -823,6 +851,7 @@ class ConStructWrapper(BaseGenerator):
         )
         with open(self.data_root / "metadata.json", "w", encoding="utf-8") as f:
             json.dump({"meta": asdict(meta), "cfg": self.cfg_dict}, f, indent=2)
+        self._log("wrote_provenance duration=%.3fs", time.perf_counter() - started_at)
 
     def _adj_arrays_to_batches(self, arrays: list[dict[str, np.ndarray]], batch_size: int, shuffle: bool) -> Iterator[_PlaceHolder]:
         indices = list(range(len(arrays)))
@@ -876,15 +905,24 @@ class ConStructWrapper(BaseGenerator):
     # Model build/load/save
     # ------------------------------------------------------------------
     def _build_model_from_meta(self, meta: _ConStructDatasetMeta) -> None:
+        started_at = time.perf_counter()
+        self._log(
+            "building_model max_n_nodes=%d atom_types=%d edge_types=%d",
+            meta.max_n_nodes,
+            meta.num_atom_types,
+            meta.num_edge_types,
+        )
         self._import_modules()
         self.meta = meta
         self.dataset_infos = _ConStructDatasetInfos(meta, _PlaceHolder)
         self.model = _DenseConStructModel(self.cfg, self.dataset_infos, self.mods).to(self.device)
+        self._log("built_model parameters=%d duration=%.3fs", self._count_parameters(self.model), time.perf_counter() - started_at)
 
     def _save_checkpoint(self) -> None:
         if self.model is None or self.meta is None:
             raise RuntimeError("Cannot save ConStruct checkpoint before model/meta are initialized.")
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        self._log("saving_checkpoint path=%s", self.checkpoint_path)
         torch.save(
             {
                 "model_state_dict": self.model.state_dict(),
@@ -896,6 +934,8 @@ class ConStructWrapper(BaseGenerator):
         )
 
     def load(self) -> None:
+        started_at = time.perf_counter()
+        self._log("load_start checkpoint_path=%s", self.checkpoint_path)
         if not self.checkpoint_path.exists():
             raise FileNotFoundError(
                 f"ConStruct checkpoint not found: {self.checkpoint_path}. Train the model first or set checkpoint_path."
@@ -907,8 +947,17 @@ class ConStructWrapper(BaseGenerator):
         self._build_model_from_meta(meta)
         self.model.load_state_dict(ckpt["model_state_dict"])
         self.model.eval()
+        self._log("load_end duration=%.3fs", time.perf_counter() - started_at)
 
     def train(self, train_graphs, val_graphs=None, test_graphs=None) -> None:
+        started_at = time.perf_counter()
+        self._log(
+            "train_start train_count=%d val_count=%s test_count=%s seed=%d",
+            len(train_graphs or []),
+            None if val_graphs is None else len(val_graphs),
+            None if test_graphs is None else len(test_graphs),
+            int(self.cfg.train.seed),
+        )
         self._import_modules()
         random.seed(int(self.cfg.train.seed))
         np.random.seed(int(self.cfg.train.seed))
@@ -916,6 +965,14 @@ class ConStructWrapper(BaseGenerator):
 
         train_arrays, val_arrays, test_arrays = self._split_arrays_for_meta(train_graphs, val_graphs, test_graphs)
         meta = self._build_meta(train_arrays, val_arrays, test_arrays)
+        self._log(
+            "meta_built train=%d val=%d test=%d max_n_nodes=%d node_distribution=%s",
+            meta.num_train,
+            meta.num_val,
+            meta.num_test,
+            meta.max_n_nodes,
+            meta.n_node_distribution,
+        )
         self._write_provenance(train_arrays, val_arrays, test_arrays, meta)
         self._build_model_from_meta(meta)
 
@@ -934,8 +991,10 @@ class ConStructWrapper(BaseGenerator):
         last_train_loss = None
         last_val_loss = None
         for epoch in range(n_epochs):
+            epoch_started_at = time.perf_counter()
             epoch_losses: list[float] = []
             for batch_idx, batch in enumerate(self._adj_arrays_to_batches(train_arrays, batch_size=batch_size, shuffle=True)):
+                batch_started_at = time.perf_counter()
                 optimizer.zero_grad(set_to_none=True)
                 loss, _ = self.model.loss_on_clean_batch(batch, log=False)
                 loss.backward()
@@ -943,17 +1002,38 @@ class ConStructWrapper(BaseGenerator):
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), float(clip_grad))
                 optimizer.step()
                 epoch_losses.append(float(loss.detach().cpu()))
+                if batch_idx % self.log_train_every_n_steps == 0:
+                    self._log(
+                        "train_batch_end epoch=%d/%d batch=%d loss=%.6e X_shape=%s E_shape=%s duration=%.3fs",
+                        epoch + 1,
+                        n_epochs,
+                        batch_idx + 1,
+                        float(loss.detach().cpu()),
+                        tuple(batch.X.shape),
+                        tuple(batch.E.shape),
+                        time.perf_counter() - batch_started_at,
+                    )
             last_train_loss = float(np.mean(epoch_losses)) if epoch_losses else None
 
             if val_arrays and ((epoch + 1) % int(self.config.get("val_every", 10)) == 0 or epoch == n_epochs - 1):
                 self.model.eval()
                 val_losses = []
                 with torch.no_grad():
-                    for batch in self._adj_arrays_to_batches(val_arrays, batch_size=batch_size, shuffle=False):
+                    for val_batch_idx, batch in enumerate(self._adj_arrays_to_batches(val_arrays, batch_size=batch_size, shuffle=False)):
                         val_loss, _ = self.model.loss_on_clean_batch(batch, log=False)
                         val_losses.append(float(val_loss.detach().cpu()))
+                        if val_batch_idx % self.log_train_every_n_steps == 0:
+                            self._log("val_batch_end epoch=%d/%d batch=%d loss=%.6e", epoch + 1, n_epochs, val_batch_idx + 1, float(val_loss.detach().cpu()))
                 last_val_loss = float(np.mean(val_losses)) if val_losses else None
                 self.model.train()
+            self._log(
+                "epoch_summary epoch=%d/%d train_loss=%s val_loss=%s duration=%.3fs",
+                epoch + 1,
+                n_epochs,
+                last_train_loss,
+                last_val_loss,
+                time.perf_counter() - epoch_started_at,
+            )
 
         self.model.eval()
         self._save_checkpoint()
@@ -972,8 +1052,11 @@ class ConStructWrapper(BaseGenerator):
                 f,
                 indent=2,
             )
+        self._log("train_end checkpoint_path=%s duration=%.3fs", self.checkpoint_path, time.perf_counter() - started_at)
 
     def sample(self, num_graphs: int, seed: int = 0, progress_callback=None):
+        started_at = time.perf_counter()
+        self._log("sample_start num_graphs=%d seed=%d", num_graphs, seed)
         if self.model is None:
             self.load()
         if self.model is None:
@@ -999,9 +1082,29 @@ class ConStructWrapper(BaseGenerator):
                 projector_classes=projector_classes,
                 progress_callback=progress_callback,
             )
+        self._log("sample_raw_batches count=%d", len(batches))
         graphs: list[nx.Graph] = []
-        for batch in batches:
+        for batch_idx, batch in enumerate(batches):
+            batch_started_at = time.perf_counter()
             graphs.extend(self._placeholder_batch_to_networkx(batch))
+            if batch_idx % self.log_sample_every_n_batches == 0:
+                self._log(
+                    "sample_batch_converted batch=%d generated_total=%d X_shape=%s E_shape=%s duration=%.3fs",
+                    batch_idx + 1,
+                    len(graphs),
+                    tuple(batch.X.shape),
+                    tuple(batch.E.shape),
+                    time.perf_counter() - batch_started_at,
+                )
             if len(graphs) >= num_graphs:
                 break
-        return graphs[:num_graphs]
+        result = graphs[:num_graphs]
+        self._log("sample_end returned=%d duration=%.3fs", len(result), time.perf_counter() - started_at)
+        return result
+
+    def _log(self, message: str, *args: Any) -> None:
+        if self.detailed_logging:
+            LOGGER.info("ConStructWrapper " + message, *args)
+
+    def _count_parameters(self, model: torch.nn.Module) -> int:
+        return int(sum(p.numel() for p in model.parameters()))

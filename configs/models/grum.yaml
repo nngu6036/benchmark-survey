@@ -51,6 +51,11 @@ loss_type:
   adj: default
 log_every: 10
 
+# Detailed wrapper logging.
+detailed_logging: true
+log_train_every_n_steps: 1
+log_sample_every_n_batches: 1
+
 # Diffusion mixture. num_scales overrides both x_num_scales and adj_num_scales.
 # Set to 1000 to match the upstream SBM/planar configs.
 num_scales: 1000

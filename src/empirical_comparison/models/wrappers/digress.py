@@ -45,34 +45,39 @@ class _NoOpSamplingMetrics(torch.nn.Module):
         return {"disabled": True, "reason": self.reason}
 
 
-class _BenchmarkQM9Infos:
-    """Dataset info object for benchmark-owned QM9 splits.
+class _BenchmarkMolecularInfos:
+    """Dataset info object for benchmark-owned molecular splits.
 
-    This mirrors the attributes DiGress needs from upstream ``QM9infos`` without
-    importing ``qm9_dataset.py``, which requires RDKit even when benchmark QM9
-    data has already been prepared from PyG's preprocessed archive.
+    This mirrors the attributes DiGress needs from upstream molecular infos
+    without importing dataset modules that may require RDKit even when benchmark
+    molecular data has already been prepared from PyG archives.
     """
 
-    name = "qm9"
     need_to_strip = False
 
     def __init__(self, datamodule: Any, cfg: Any, distribution_nodes: Any, utils_mod: Any) -> None:
+        self.name = str(cfg.dataset.name)
         self.remove_h = bool(cfg.dataset.remove_h)
         self._distribution_nodes = distribution_nodes
-        if self.remove_h:
-            self.atom_encoder = {"C": 0, "N": 1, "O": 2, "F": 3}
-            self.atom_decoder = ["C", "N", "O", "F"]
-            self.valencies = [4, 3, 2, 1]
-            self.atom_weights = {0: 12, 1: 14, 2: 16, 3: 19}
-        else:
-            self.atom_encoder = {"H": 0, "C": 1, "N": 2, "O": 3, "F": 4}
-            self.atom_decoder = ["H", "C", "N", "O", "F"]
-            self.valencies = [1, 4, 3, 2, 1]
-            self.atom_weights = {0: 1, 1: 12, 2: 14, 3: 16, 4: 19}
-        self.num_atom_types = len(self.atom_decoder)
-        self.n_nodes = datamodule.node_counts(max_nodes_possible=64)
+        self.n_nodes = datamodule.node_counts(max_nodes_possible=256)
         self.node_types = datamodule.node_types()
         self.edge_types = datamodule.edge_counts()
+        self.num_atom_types = int(self.node_types.shape[0])
+        if self.name == "qm9" and self.remove_h:
+            self.atom_decoder = ["C", "N", "O", "F"]
+            self.valencies = [4, 3, 2, 1][: self.num_atom_types]
+            qm9_weights = [12, 14, 16, 19]
+            self.atom_weights = {i: qm9_weights[i] for i in range(self.num_atom_types)}
+        elif self.name == "qm9":
+            self.atom_decoder = ["H", "C", "N", "O", "F"]
+            self.valencies = [1, 4, 3, 2, 1][: self.num_atom_types]
+            qm9_weights = [1, 12, 14, 16, 19]
+            self.atom_weights = {i: qm9_weights[i] for i in range(self.num_atom_types)}
+        else:
+            self.atom_decoder = [f"Atom{i}" for i in range(self.num_atom_types)]
+            self.valencies = [4 for _ in range(self.num_atom_types)]
+            self.atom_weights = {i: 1 for i in range(self.num_atom_types)}
+        self.atom_encoder = {atom: i for i, atom in enumerate(self.atom_decoder)}
         self.max_n_nodes = len(self.n_nodes) - 1
         self.max_weight = max(1, self.max_n_nodes * max(self.atom_weights.values()))
         self.valency_distribution = datamodule.valency_count(self.max_n_nodes)
@@ -149,7 +154,7 @@ class DiGressWrapper(BaseGenerator):
     dataset / dataset_name: str
         Benchmark dataset name. ``dataset`` is injected by the benchmark scripts;
         ``dataset_name`` can override it. Supported values: ``sbm``, ``planar``,
-        ``comm20``, ``qm9``.
+        ``comm20``, ``qm9``, ``zinc``.
     checkpoint_path: str
         Path used by ``load`` and ``train``. Relative paths are resolved against
         the current working directory.
@@ -167,9 +172,8 @@ class DiGressWrapper(BaseGenerator):
     * Node and edge attributes from NetworkX graphs are ignored for SPECTRE
       datasets; that path uses one dummy node type and two edge classes:
       no-edge and edge.
-    * For QM9, ``node_label`` and ``edge_type`` are consumed as atom and bond
-      classes. The benchmark's canonical QM9 schema maps H/C/N/O/F to 0..4 and
-      bond classes to 1..4, with 0 reserved for no-edge.
+    * For molecular datasets, ``node_label`` and ``edge_type`` are consumed as
+      atom and bond classes. Bond class 0 is reserved for dense no-edge states.
     * DiGress samples by iterating all ``cfg.model.diffusion_steps``. The benchmark
       ``sampling.num_steps`` field is therefore not used to shorten sampling unless
       you explicitly set ``model_overrides.diffusion_steps`` before training.
@@ -188,7 +192,7 @@ class DiGressWrapper(BaseGenerator):
     supports_featureless_graphs = True
 
     SPECTRE_DATASETS = {"sbm", "planar", "comm20"}
-    MOLECULAR_DATASETS = {"qm9"}
+    MOLECULAR_DATASETS = {"qm9", "zinc"}
     SUPPORTED_DATASETS = SPECTRE_DATASETS | MOLECULAR_DATASETS
 
     def __init__(self, config: dict[str, Any]) -> None:
@@ -204,6 +208,7 @@ class DiGressWrapper(BaseGenerator):
         self.detailed_logging = bool(config.get("detailed_logging", True))
         self.log_train_every_n_steps = max(1, int(config.get("log_train_every_n_steps", 1)))
         self.log_sample_every_n_batches = max(1, int(config.get("log_sample_every_n_batches", 1)))
+        self._molecular_atom_class_count: int | None = None
 
         default_repo_root = Path(__file__).resolve().parents[4] / "external" / "DiGress"
         repo_root = os.environ.get("DIGRESS_REPO") or config.get("repo_root") or default_repo_root
@@ -348,7 +353,10 @@ class DiGressWrapper(BaseGenerator):
         general = OmegaConf.load(cfg_dir / "general" / "general_default.yaml")
         model = OmegaConf.load(cfg_dir / "model" / "discrete.yaml")
         train = OmegaConf.load(cfg_dir / "train" / "train_default.yaml")
-        dataset = OmegaConf.load(cfg_dir / "dataset" / f"{self.dataset_name}.yaml")
+        dataset_cfg_path = cfg_dir / "dataset" / f"{self.dataset_name}.yaml"
+        if not dataset_cfg_path.exists() and self.is_molecular:
+            dataset_cfg_path = cfg_dir / "dataset" / "qm9.yaml"
+        dataset = OmegaConf.load(dataset_cfg_path)
 
         cfg = OmegaConf.create({})
         cfg.general = general
@@ -462,9 +470,15 @@ class DiGressWrapper(BaseGenerator):
     # Molecular data materialization
     # ------------------------------------------------------------------
     def _atom_class_count(self) -> int:
-        if self.dataset_name != "qm9":
-            raise ValueError(f"Unsupported molecular DiGress dataset: {self.dataset_name}")
-        return 4 if bool(self.config.get("remove_h", False)) else 5
+        if self.dataset_name == "qm9":
+            return 4 if bool(self.config.get("remove_h", False)) else 5
+        if self._molecular_atom_class_count is not None:
+            return int(self._molecular_atom_class_count)
+        stats = self.config.get("graph_attribute_stats") or {}
+        values = stats.get("node_label_values") or []
+        if values:
+            return len(values)
+        raise RuntimeError("Molecular atom class count is unknown; write molecular splits before conversion.")
 
     def _bond_class_count(self) -> int:
         # No bond, single, double, triple, aromatic.
@@ -555,6 +569,13 @@ class DiGressWrapper(BaseGenerator):
     ) -> dict[str, list[Any]]:
         started_at = time.perf_counter()
         self.data_root.mkdir(parents=True, exist_ok=True)
+        if self.dataset_name != "qm9":
+            all_graphs = list(train_graphs) + list(val_graphs or []) + list(test_graphs or [])
+            max_label = max(
+                [int(attrs.get("node_label", 0)) for graph in all_graphs for _, attrs in graph.nodes(data=True)]
+                or [0]
+            )
+            self._molecular_atom_class_count = max_label + 1
         train_data = self._graphs_to_molecular_data(list(train_graphs), "train")
         if val_graphs is None or len(val_graphs) == 0:
             n_val = max(1, int(round(0.1 * len(train_data))))
@@ -574,6 +595,7 @@ class DiGressWrapper(BaseGenerator):
             "num_val": len(val_data),
             "num_test": len(test_data),
             "remove_h": bool(self.config.get("remove_h", False)),
+            "num_atom_classes": self._atom_class_count(),
             "format": "dict of benchmark-converted PyG molecular Data objects for DiGress",
         }
         with open(self.data_root / "empirical_comparison_meta.json", "w", encoding="utf-8") as f:
@@ -618,15 +640,21 @@ class DiGressWrapper(BaseGenerator):
             ExtraMolecularFeatures = self._imports["extra_features_molecular"].ExtraMolecularFeatures
 
             datamodule = MolecularDataModule(self.cfg, molecular_splits)
-            dataset_infos = _BenchmarkQM9Infos(
+            dataset_infos = _BenchmarkMolecularInfos(
                 datamodule=datamodule,
                 cfg=self.cfg,
                 distribution_nodes=self._imports["distributions"].DistributionNodes,
                 utils_mod=self._imports["digress_utils"],
             )
-            train_metrics = TrainMolecularMetricsDiscrete(dataset_infos)
+            if self.dataset_name == "qm9":
+                train_metrics = TrainMolecularMetricsDiscrete(dataset_infos)
+            else:
+                train_metrics = TrainAbstractMetricsDiscrete()
             extra_features = DummyExtraFeatures()
-            domain_features = ExtraMolecularFeatures(dataset_infos=dataset_infos)
+            if self.dataset_name == "qm9" or bool(self.config.get("use_molecular_domain_features", False)):
+                domain_features = ExtraMolecularFeatures(dataset_infos=dataset_infos)
+            else:
+                domain_features = DummyExtraFeatures()
             sampling_metrics = _NoOpSamplingMetrics(
                 reason="benchmark wrapper disables upstream molecular sampling metrics"
             )

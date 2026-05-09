@@ -12,6 +12,12 @@ dataset_name: null
 # so DiGress should use the with-H atom vocabulary unless this is set true.
 remove_h: false
 
+# ZINC/generic molecular path uses categorical atom classes from the benchmark
+# data. QM9 keeps DiGress's molecular domain features enabled; generic molecular
+# datasets default to dummy domain features because atom classes may not map to
+# real chemical symbols/valencies.
+use_molecular_domain_features: false
+
 # DiGress SPECTRE tensors created from benchmark NetworkX splits are stored here.
 data_subdir: outputs/digress_data/${dataset}
 

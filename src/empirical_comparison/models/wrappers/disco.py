@@ -792,7 +792,10 @@ class DisCoWrapper(BaseGenerator):
                 ts = torch.rand((E_0.shape[0],), device=self.device) * (1.0 - min_time) + min_time
 
                 X_t_idx, E_t_idx = self.diffuser.forward_diffusion(X_0, E_0, ts)
-                X_t_one_hot = X_t_idx
+                if include_node_feature:
+                    X_t_one_hot = F.one_hot(X_t_idx.long(), num_classes=self.meta.n_node_type).float()
+                else:
+                    X_t_one_hot = X_t_idx
                 E_t_one_hot = F.one_hot(E_t_idx, num_classes=self.meta.n_edge_type).float()
                 X_t, E_t, y_t = self.add_auxiliary_feature(X_t_one_hot, E_t_one_hot, node_mask)
                 y_t = torch.cat([y_t, ts.unsqueeze(-1)], dim=-1)

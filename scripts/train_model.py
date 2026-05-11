@@ -12,12 +12,8 @@ if str(SRC) not in sys.path:
 
 from empirical_comparison.evaluation.data_io import load_dataset_splits
 from empirical_comparison.evaluation.run_utils import (
-    explicit_run_selection,
-    make_model_run_config,
-    parse_run_ids,
+    make_model_config,
     run_output_dir,
-    run_seed,
-    should_use_run_paths,
 )
 from empirical_comparison.graphs.attributes import attribute_coverage, canonicalize_graph_attributes, fit_attribute_statistics, normalize_schema
 from empirical_comparison.registry import get_model_class, available_datasets, available_models
@@ -36,30 +32,22 @@ def _train_one_run(
     model_cfg_path: Path,
     data_cfg_path: Path,
     dataset_root: str,
-    base_seed: int,
-    seed_stride: int,
-    run_id: int,
-    use_run_paths: bool,
+    seed: int,
     force_data: bool,
     dry_run: bool,
 ) -> dict:
-    seed = run_seed(base_seed, run_id, seed_stride)
-    logical_run_id = run_id if use_run_paths else None
     set_seed(seed)
-    model_cfg = make_model_run_config(
+    model_cfg = make_model_config(
         base_model_cfg,
         dataset=dataset,
         model=model_name,
-        run_id=logical_run_id,
         seed=seed,
-        use_run_paths=use_run_paths,
     )
 
     logger.info(
-        "Training model=%s dataset=%s run_id=%s seed=%s checkpoint=%s",
+        "Training model=%s dataset=%s seed=%s checkpoint=%s",
         model_name,
         dataset,
-        "legacy" if logical_run_id is None else logical_run_id,
         seed,
         model_cfg.get("checkpoint_path"),
     )
@@ -67,7 +55,6 @@ def _train_one_run(
         return {
             "dataset": dataset,
             "model": model_name,
-            "run_id": logical_run_id,
             "seed": seed,
             "checkpoint_path": model_cfg.get("checkpoint_path"),
             "dry_run": True,
@@ -102,13 +89,12 @@ def _train_one_run(
     model.train(splits["train"], splits.get("val"), splits.get("test"))
     elapsed = time.perf_counter() - start
 
-    run_dir = run_output_dir(dataset, model_name, logical_run_id)
+    run_dir = run_output_dir(dataset, model_name)
     run_dir.mkdir(parents=True, exist_ok=True)
     save_yaml(model_cfg, run_dir / "resolved_model_config.yaml", force=True)
     metadata = {
         "dataset": dataset,
         "model": model_name,
-        "run_id": logical_run_id,
         "seed": seed,
         "runtime_seconds": elapsed,
         "checkpoint_path": model_cfg.get("checkpoint_path"),
@@ -120,10 +106,9 @@ def _train_one_run(
     }
     save_json(metadata, run_dir / "train_metadata.json", force=True)
     logger.info(
-        "Finished training model=%s dataset=%s run_id=%s in %.2fs",
+        "Finished training model=%s dataset=%s in %.2fs",
         model_name,
         dataset,
-        "legacy" if logical_run_id is None else logical_run_id,
         elapsed,
     )
     return metadata
@@ -136,11 +121,7 @@ def main() -> None:
     parser.add_argument("--model-config", type=str, default=None)
     parser.add_argument("--dataset-config", type=str, default=None)
     parser.add_argument("--dataset-root", type=str, default="outputs/datasets")
-    parser.add_argument("--seed", type=int, default=42, help="Base seed. Run i uses seed + i * seed_stride.")
-    parser.add_argument("--seed-stride", type=int, default=1000)
-    parser.add_argument("--num-runs", type=int, default=1, help="Train this many independent model versions.")
-    parser.add_argument("--run-id", type=int, default=None, help="Train only one explicit run id.")
-    parser.add_argument("--run-ids", nargs="+", type=int, default=None, help="Train specific run ids.")
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--force-data", action="store_true", help="Rebuild persisted dataset splits before training.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -148,47 +129,21 @@ def main() -> None:
     model_cfg_path = Path(args.model_config) if args.model_config else Path("configs/models") / f"{args.model}.yaml"
     data_cfg_path = Path(args.dataset_config) if args.dataset_config else Path("configs/datasets") / f"{args.dataset}.yaml"
     base_model_cfg = load_yaml(model_cfg_path)
-    run_ids = parse_run_ids(run_id=args.run_id, run_ids=args.run_ids, num_runs=args.num_runs)
-    use_run_paths = should_use_run_paths(run_ids, explicit_run_selection(args.run_id, args.run_ids))
 
-    logger.info("model=%s dataset=%s runs=%s base_seed=%s", args.model, args.dataset, run_ids, args.seed)
-    logger.info("model_config=%s dataset_config=%s run_aware_paths=%s", model_cfg_path, data_cfg_path, use_run_paths)
+    logger.info("model=%s dataset=%s seed=%s", args.model, args.dataset, args.seed)
+    logger.info("model_config=%s dataset_config=%s", model_cfg_path, data_cfg_path)
 
-    metadata = []
-    for rid in run_ids:
-        metadata.append(
-            _train_one_run(
-                model_name=args.model,
-                dataset=args.dataset,
-                base_model_cfg=base_model_cfg,
-                model_cfg_path=model_cfg_path,
-                data_cfg_path=data_cfg_path,
-                dataset_root=args.dataset_root,
-                base_seed=args.seed,
-                seed_stride=args.seed_stride,
-                run_id=rid,
-                use_run_paths=use_run_paths,
-                force_data=args.force_data,
-                dry_run=args.dry_run,
-            )
-        )
-
-    if not args.dry_run and use_run_paths:
-        out = Path("outputs/runs") / args.dataset / args.model / "training_runs.json"
-        save_json(
-            {
-                "dataset": args.dataset,
-                "model": args.model,
-                "base_seed": args.seed,
-                "seed_stride": args.seed_stride,
-                "num_runs": len(run_ids),
-                "run_ids": run_ids,
-                "runs": metadata,
-            },
-            out,
-            force=True,
-        )
-        logger.info("Saved repeated-training manifest to %s", out)
+    _train_one_run(
+        model_name=args.model,
+        dataset=args.dataset,
+        base_model_cfg=base_model_cfg,
+        model_cfg_path=model_cfg_path,
+        data_cfg_path=data_cfg_path,
+        dataset_root=args.dataset_root,
+        seed=args.seed,
+        force_data=args.force_data,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":

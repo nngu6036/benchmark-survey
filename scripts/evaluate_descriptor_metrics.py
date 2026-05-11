@@ -16,14 +16,8 @@ if str(SRC) not in sys.path:
 
 from empirical_comparison.evaluation.data_io import load_dataset_splits
 from empirical_comparison.evaluation.run_utils import (
-    aggregate_metric_path,
-    aggregate_numeric_results,
     existing_sample_path,
-    explicit_run_selection,
     metric_path,
-    parse_run_ids,
-    run_seed,
-    should_use_run_paths,
 )
 from empirical_comparison.generation.validity import quality_metrics
 from empirical_comparison.graphs.attributes import attribute_coverage, attribute_descriptor_features, canonicalize_graph_attributes, fit_attribute_statistics, normalize_schema
@@ -61,8 +55,8 @@ def _load_train_graphs(dataset: str, dataset_root: str) -> list[nx.Graph]:
         return []
 
 
-def _load_generated_graphs(dataset: str, model: str, run_id: int | None) -> list[nx.Graph]:
-    sample_file = existing_sample_path(dataset, model, run_id)
+def _load_generated_graphs(dataset: str, model: str) -> list[nx.Graph]:
+    sample_file = existing_sample_path(dataset, model)
     if not sample_file.exists():
         raise FileNotFoundError(f"Generated sample file not found: {sample_file}. Run generate_samples.py first.")
     graphs = load_pickle(sample_file)
@@ -112,10 +106,10 @@ def _mmd_with_optional_bootstrap(ref_desc, gen_desc, *, metric_kind: str, sigma:
     return float(np.mean(vals)), float(np.std(vals, ddof=0))
 
 
-def _evaluate_one_run(args, *, run_id: int, logical_run_id: int | None, seed: int, output_path: Path | None) -> dict:
+def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
     start = time.perf_counter()
     ref_graphs = _subsample(_load_reference_graphs(args.dataset, args.dataset_root, args.reference_split), args.max_graphs, args.seed)
-    gen_graphs = _subsample(_load_generated_graphs(args.dataset, args.model, logical_run_id), args.max_graphs, seed + 1)
+    gen_graphs = _subsample(_load_generated_graphs(args.dataset, args.model), args.max_graphs, seed + 1)
     train_graphs = _load_train_graphs(args.dataset, args.dataset_root)
     attr_schema = normalize_schema({"graph_attributes": {
         "enabled": args.attribute_schema_enabled,
@@ -130,10 +124,9 @@ def _evaluate_one_run(args, *, run_id: int, logical_run_id: int | None, seed: in
     gen_graphs, _ = canonicalize_graph_attributes(gen_graphs, attr_schema, attr_stats)
 
     logger.info(
-        "Evaluating descriptor metrics: dataset=%s model=%s run_id=%s reference_split=%s ref=%d gen=%d",
+        "Evaluating descriptor metrics: dataset=%s model=%s reference_split=%s ref=%d gen=%d",
         args.dataset,
         args.model,
-        "legacy" if logical_run_id is None else logical_run_id,
         args.reference_split,
         len(ref_graphs),
         len(gen_graphs),
@@ -194,15 +187,12 @@ def _evaluate_one_run(args, *, run_id: int, logical_run_id: int | None, seed: in
     payload = {
         "dataset": args.dataset,
         "model": args.model,
-        "run_id": logical_run_id,
         "metric_family": "descriptor_based",
         "num_reference_graphs": len(ref_graphs),
         "num_generated_graphs": len(gen_graphs),
         "runtime_seconds": elapsed,
         "protocol": {
             "seed": seed,
-            "base_seed": args.seed,
-            "run_id": logical_run_id,
             "reference_split": args.reference_split,
             "max_graphs": args.max_graphs,
             "sigma": args.sigma,
@@ -233,43 +223,10 @@ def _evaluate_one_run(args, *, run_id: int, logical_run_id: int | None, seed: in
         "results": results,
     }
     if output_path is None:
-        output_path = metric_path(args.dataset, args.model, METRIC_FILENAME, logical_run_id)
+        output_path = metric_path(args.dataset, args.model, METRIC_FILENAME)
     save_json(payload, output_path)
     logger.info("Saved descriptor metrics to %s in %.2fs", output_path, elapsed)
     return payload
-
-
-def _save_aggregate(args, run_ids: list[int], run_payloads: list[dict], output_path: Path | None) -> None:
-    agg = aggregate_numeric_results(run_payloads)
-    payload = {
-        "dataset": args.dataset,
-        "model": args.model,
-        "run_id": None,
-        "is_aggregate": True,
-        "metric_family": "descriptor_based",
-        "runtime_seconds": float(sum(float(p.get("runtime_seconds", 0.0)) for p in run_payloads)),
-        "num_runs": len(run_payloads),
-        "run_ids": run_ids,
-        "protocol": {
-            "base_seed": args.seed,
-            "seed_stride": args.seed_stride,
-            "reference_split": args.reference_split,
-            "max_graphs": args.max_graphs,
-            "sigma": args.sigma,
-            "num_bootstrap": args.num_bootstrap,
-            "skip_orbit": args.skip_orbit,
-        },
-        "results": agg["flat"],
-        "results_across_runs": agg["nested"],
-        "run_results": [
-            {"run_id": p.get("run_id"), "seed": (p.get("protocol") or {}).get("seed"), "results": p.get("results", {})}
-            for p in run_payloads
-        ],
-    }
-    if output_path is None:
-        output_path = aggregate_metric_path(args.dataset, args.model, METRIC_FILENAME)
-    save_json(payload, output_path)
-    logger.info("Saved across-run descriptor aggregate to %s", output_path)
 
 
 def main() -> None:
@@ -279,10 +236,6 @@ def main() -> None:
     parser.add_argument("--dataset-root", type=str, default="outputs/datasets")
     parser.add_argument("--reference-split", choices=["train", "val", "test"], default="test")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--seed-stride", type=int, default=1000)
-    parser.add_argument("--num-runs", type=int, default=1)
-    parser.add_argument("--run-id", type=int, default=None)
-    parser.add_argument("--run-ids", nargs="+", type=int, default=None)
     parser.add_argument("--max-graphs", type=int, default=None)
     parser.add_argument("--sigma", type=float, default=None)
     parser.add_argument("--num-bootstrap", type=int, default=0)
@@ -300,23 +253,11 @@ def main() -> None:
     parser.add_argument("--edge-label-attr", type=str, default="edge_type")
     parser.add_argument("--edge-feature-attr", type=str, default="edge_attr")
     parser.add_argument("--graph-label-attr", type=str, default="graph_label")
-    parser.add_argument("--output", type=str, default=None, help="Single-run output path, or aggregate output path for multi-run evaluation.")
+    parser.add_argument("--output", type=str, default=None)
     args = parser.parse_args()
 
-    run_ids = parse_run_ids(run_id=args.run_id, run_ids=args.run_ids, num_runs=args.num_runs)
-    use_run_paths = should_use_run_paths(run_ids, explicit_run_selection(args.run_id, args.run_ids))
     output_path = Path(args.output) if args.output else None
-
-    payloads = []
-    for rid in run_ids:
-        seed = run_seed(args.seed, rid, args.seed_stride)
-        logical_run_id = rid if use_run_paths else None
-        one_output = output_path if len(run_ids) == 1 else None
-        payloads.append(_evaluate_one_run(args, run_id=rid, logical_run_id=logical_run_id, seed=seed, output_path=one_output))
-
-    if len(run_ids) > 1 or use_run_paths:
-        aggregate_output = output_path if len(run_ids) > 1 else None
-        _save_aggregate(args, run_ids, payloads, aggregate_output)
+    _evaluate(args, seed=args.seed, output_path=output_path)
 
 
 if __name__ == "__main__":

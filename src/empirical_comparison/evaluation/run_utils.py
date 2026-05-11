@@ -170,6 +170,24 @@ def make_model_run_config(
     return resolve(cfg)
 
 
+def make_model_config(
+    model_cfg: dict[str, Any],
+    *,
+    dataset: str,
+    model: str,
+    seed: int,
+) -> dict[str, Any]:
+    """Deep-copy and resolve a model config for the single-checkpoint workflow."""
+    return make_model_run_config(
+        model_cfg,
+        dataset=dataset,
+        model=model,
+        run_id=None,
+        seed=seed,
+        use_run_paths=False,
+    )
+
+
 def run_output_dir(dataset: str, model: str, run_id: int | None = None) -> Path:
     base = Path("outputs/runs") / dataset / model
     return base if run_id is None else base / _run_dir_name(run_id)

@@ -12,14 +12,10 @@ if str(SRC) not in sys.path:
 
 from empirical_comparison.evaluation.data_io import load_dataset_splits
 from empirical_comparison.evaluation.run_utils import (
-    explicit_run_selection,
-    make_model_run_config,
-    parse_run_ids,
-    run_seed,
+    make_model_config,
     sample_config_path,
     sample_metadata_path,
     sample_path,
-    should_use_run_paths,
 )
 from empirical_comparison.generation.sampler import model_capabilities, sample_graphs
 from empirical_comparison.graphs.attributes import apply_empirical_attributes, attribute_coverage, fit_attribute_statistics, normalize_schema
@@ -32,7 +28,7 @@ from empirical_comparison.utils.seed import set_seed
 logger = get_logger(__name__)
 
 
-def _generate_one_run(
+def _generate_samples(
     *,
     model_name: str,
     dataset: str,
@@ -40,43 +36,36 @@ def _generate_one_run(
     cfg_path: Path,
     dataset_root: str,
     num_samples: int,
-    base_seed: int,
-    seed_stride: int,
+    seed: int,
     sample_seed_offset: int,
-    run_id: int,
-    use_run_paths: bool,
     force: bool,
     dry_run: bool,
     show_progress: bool,
 ) -> dict:
-    seed = run_seed(base_seed, run_id, seed_stride) + int(sample_seed_offset)
-    logical_run_id = run_id if use_run_paths else None
+    seed = int(seed) + int(sample_seed_offset)
     set_seed(seed)
-    cfg = make_model_run_config(
+    cfg = make_model_config(
         base_cfg,
         dataset=dataset,
         model=model_name,
-        run_id=logical_run_id,
         seed=seed,
-        use_run_paths=use_run_paths,
     )
     cfg["num_samples"] = int(num_samples)
 
-    out = sample_path(dataset, model_name, logical_run_id)
-    metadata_out = sample_metadata_path(dataset, model_name, logical_run_id)
-    resolved_cfg_out = sample_config_path(dataset, model_name, logical_run_id)
+    out = sample_path(dataset, model_name)
+    metadata_out = sample_metadata_path(dataset, model_name)
+    resolved_cfg_out = sample_config_path(dataset, model_name)
     logger.info(
-        "Generating samples: dataset=%s model=%s run_id=%s num_samples=%d seed=%d checkpoint=%s",
+        "Generating samples: dataset=%s model=%s num_samples=%d seed=%d checkpoint=%s",
         dataset,
         model_name,
-        "legacy" if logical_run_id is None else logical_run_id,
         num_samples,
         seed,
         cfg.get("checkpoint_path"),
     )
     if dry_run:
         logger.info("Dry run: would write %s", out)
-        return {"dataset": dataset, "model": model_name, "run_id": logical_run_id, "seed": seed, "sample_path": str(out), "dry_run": True}
+        return {"dataset": dataset, "model": model_name, "seed": seed, "sample_path": str(out), "dry_run": True}
     if out.exists() and not force:
         raise FileExistsError(f"Sample file already exists: {out}. Use --force to overwrite.")
 
@@ -87,7 +76,7 @@ def _generate_one_run(
         num_samples,
         seed=seed,
         show_progress=show_progress,
-        progress_desc=f"Sampling {dataset}/{model_name}/{'legacy' if logical_run_id is None else f'run {logical_run_id}'}",
+        progress_desc=f"Sampling {dataset}/{model_name}",
     )
     elapsed = time.perf_counter() - start
     attr_schema = normalize_schema(cfg)
@@ -111,7 +100,6 @@ def _generate_one_run(
     metadata = {
         "dataset": dataset,
         "model": model_name,
-        "run_id": logical_run_id,
         "seed": seed,
         "num_samples_requested": num_samples,
         "num_samples_saved": len(graphs),
@@ -140,16 +128,12 @@ def _generate_one_run(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate samples from trained graph generator wrapper run(s).")
+    parser = argparse.ArgumentParser(description="Generate samples from a trained graph generator wrapper.")
     parser.add_argument("--model", required=True, choices=available_models())
     parser.add_argument("--dataset", required=True, choices=available_datasets())
     parser.add_argument("--num-samples", type=int, default=128)
-    parser.add_argument("--seed", type=int, default=42, help="Base seed. Run i uses seed + i * seed_stride.")
-    parser.add_argument("--seed-stride", type=int, default=1000)
-    parser.add_argument("--sample-seed-offset", type=int, default=17, help="Offset added to each training-run seed for sampling.")
-    parser.add_argument("--num-runs", type=int, default=1)
-    parser.add_argument("--run-id", type=int, default=None)
-    parser.add_argument("--run-ids", nargs="+", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--sample-seed-offset", type=int, default=17, help="Offset added to the training seed for sampling.")
     parser.add_argument("--model-config", type=str, default=None)
     parser.add_argument("--dataset-root", type=str, default="outputs/datasets")
     parser.add_argument("--force", action="store_true")
@@ -159,47 +143,19 @@ def main() -> None:
 
     cfg_path = Path(args.model_config) if args.model_config else Path("configs/models") / f"{args.model}.yaml"
     base_cfg = load_yaml(cfg_path)
-    run_ids = parse_run_ids(run_id=args.run_id, run_ids=args.run_ids, num_runs=args.num_runs)
-    use_run_paths = should_use_run_paths(run_ids, explicit_run_selection(args.run_id, args.run_ids))
-
-    metadata = []
-    for rid in run_ids:
-        metadata.append(
-            _generate_one_run(
-                model_name=args.model,
-                dataset=args.dataset,
-                base_cfg=base_cfg,
-                cfg_path=cfg_path,
-                dataset_root=args.dataset_root,
-                num_samples=args.num_samples,
-                base_seed=args.seed,
-                seed_stride=args.seed_stride,
-                sample_seed_offset=args.sample_seed_offset,
-                run_id=rid,
-                use_run_paths=use_run_paths,
-                force=args.force,
-                dry_run=args.dry_run,
-                show_progress=not args.no_progress,
-            )
-        )
-
-    if not args.dry_run and use_run_paths:
-        manifest = Path("outputs/samples") / args.dataset / args.model / "sample_runs.json"
-        save_json(
-            {
-                "dataset": args.dataset,
-                "model": args.model,
-                "base_seed": args.seed,
-                "seed_stride": args.seed_stride,
-                "sample_seed_offset": args.sample_seed_offset,
-                "num_runs": len(run_ids),
-                "run_ids": run_ids,
-                "runs": metadata,
-            },
-            manifest,
-            force=True,
-        )
-        logger.info("Saved sample-run manifest to %s", manifest)
+    _generate_samples(
+        model_name=args.model,
+        dataset=args.dataset,
+        base_cfg=base_cfg,
+        cfg_path=cfg_path,
+        dataset_root=args.dataset_root,
+        num_samples=args.num_samples,
+        seed=args.seed,
+        sample_seed_offset=args.sample_seed_offset,
+        force=args.force,
+        dry_run=args.dry_run,
+        show_progress=not args.no_progress,
+    )
 
 
 if __name__ == "__main__":

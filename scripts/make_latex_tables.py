@@ -19,7 +19,6 @@ logger = get_logger(__name__)
 PREFERRED_COLUMNS = [
     "dataset",
     "model",
-    "num_runs",
     "degree_mmd",
     "clustering_mmd",
     "orbit_mmd",
@@ -38,7 +37,6 @@ PREFERRED_COLUMNS = [
 COLUMN_RENAMES = {
     "dataset": "Dataset",
     "model": "Model",
-    "num_runs": "Runs",
     "degree_mmd": r"Degree MMD $\downarrow$",
     "clustering_mmd": r"Clustering MMD $\downarrow$",
     "orbit_mmd": r"Orbit MMD $\downarrow$",
@@ -109,7 +107,7 @@ def main() -> None:
         index=False,
         escape=False,
         caption=(
-            "Aggregated graph-generation benchmark results. Repeated-training columns are reported as mean $\\pm$ standard deviation when available. "
+            "Aggregated graph-generation benchmark results. Bootstrap or partition summaries are reported as mean $\\pm$ standard deviation when available. "
             "Lower is better for discrepancy, PGS, and runtime metrics; classifier AUC is best near 0.5; validity, uniqueness, and novelty are higher-is-better."
         ),
         label="tab:synthetic_benchmark_results",

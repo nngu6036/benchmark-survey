@@ -25,9 +25,7 @@ EXCLUDE_FROM_METRIC_AGG = {
     "runtime_seconds",
     "seed",
     "base_seed",
-    "run_id",
     "is_aggregate",
-    "num_runs",
 }
 
 
@@ -38,9 +36,7 @@ def _flatten_results(obj: dict[str, Any]) -> dict[str, Any]:
         "model": obj.get("model"),
         "metric_family": obj.get("metric_family"),
         "runtime_seconds": obj.get("runtime_seconds"),
-        "run_id": obj.get("run_id", protocol.get("run_id")),
         "is_aggregate": bool(obj.get("is_aggregate", False)),
-        "num_runs": obj.get("num_runs"),
     }
     if "seed" in protocol:
         row["seed"] = protocol["seed"]
@@ -64,19 +60,12 @@ def _aggregate_individual_metric_rows(group: pd.DataFrame) -> dict[str, Any]:
         "model": first.get("model"),
         "metric_family": first.get("metric_family"),
         "is_aggregate": True,
-        "num_runs": int(len(group)),
         "source_file": ";".join(group.get("source_file", pd.Series(dtype=str)).astype(str).tolist()),
     }
     if "runtime_seconds" in group.columns:
         vals = pd.to_numeric(group["runtime_seconds"], errors="coerce").dropna()
         if len(vals):
             out["runtime_seconds"] = float(vals.sum())
-    run_ids = []
-    if "run_id" in group.columns:
-        run_ids = [x for x in group["run_id"].dropna().tolist()]
-    if run_ids:
-        out["run_ids"] = str(run_ids)
-
     for col in group.columns:
         if col in EXCLUDE_FROM_METRIC_AGG or col.endswith("_std"):
             continue

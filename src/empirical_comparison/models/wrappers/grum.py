@@ -476,7 +476,7 @@ class GruMWrapper:
         return repo_root
 
     def _default_base_config(self, dataset: str) -> str:
-        if dataset in {"sbm", "planar", "proteins", "qm9", "zinc250k"}:
+        if dataset in {"sbm", "planar", "proteins"}:
             return dataset
         return "planar"
 
@@ -590,8 +590,14 @@ class GruMWrapper:
             )
         cfg["data"]["batch_size"] = int(self._cfg("batch_size", cfg["data"].get("batch_size", 32)))
         cfg["data"]["perm_mix"] = bool(self._cfg("perm_mix", cfg["data"].get("perm_mix", True)))
-        cfg["data"].setdefault("feat", {})
-        feat_types = self._cfg("feat_types", cfg["data"].get("feat", {}).get("type", ["eig1", "eig2"]))
+        base_feat = cfg["data"].get("feat", {})
+        if isinstance(base_feat, Mapping):
+            cfg["data"]["feat"] = dict(base_feat)
+            base_feat_types = cfg["data"]["feat"].get("type", ["eig1", "eig2"])
+        else:
+            cfg["data"]["feat"] = {"type": base_feat}
+            base_feat_types = base_feat
+        feat_types = self._cfg("feat_types", base_feat_types)
         if isinstance(feat_types, str):
             feat_types = [feat_types]
         cfg["data"]["feat"]["type"] = list(feat_types)

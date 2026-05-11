@@ -6,6 +6,7 @@ import os
 import random
 import shutil
 import sys
+import time
 import types
 import warnings
 from dataclasses import asdict, dataclass
@@ -18,7 +19,11 @@ import torch
 import torch.nn.functional as F
 
 from empirical_comparison.models.base import BaseGenerator
+from empirical_comparison.utils.logging import get_logger
 from empirical_comparison.utils.progress import update_progress
+
+
+LOGGER = get_logger(__name__)
 
 
 class _ConfigNode(types.SimpleNamespace):
@@ -474,6 +479,9 @@ class ConStructWrapper(BaseGenerator):
         self.dataset_infos: _ConStructDatasetInfos | None = None
         self.model: _DenseConStructModel | None = None
         self.projector_classes: dict[str, Any] | None = None
+        self.detailed_logging = bool(config.get("detailed_logging", True))
+        self.log_train_every_n_steps = max(1, int(config.get("log_train_every_n_steps", 1)))
+        self.log_epoch_every = max(1, int(config.get("log_epoch_every", 1)))
 
     @property
     def name(self) -> str:
@@ -538,6 +546,10 @@ class ConStructWrapper(BaseGenerator):
         if rev_proj_value is None:
             rev_proj_value = "planar" if self.dataset == "planar" else False
 
+        molecular_like = self.dataset in {"qm9", "zinc"}
+        disable_structural_for_molecular = bool(self.config.get("disable_structural_features_for_molecular", True))
+        use_structural_features = not (molecular_like and disable_structural_for_molecular)
+
         cfg = {
             "general": {
                 "name": self.config.get("experiment_name", f"construct_{self.dataset}"),
@@ -559,8 +571,8 @@ class ConStructWrapper(BaseGenerator):
                 "transition": str(self.config.get("transition", "absorbing_edges")),
                 "diffusion_steps": diffusion_steps,
                 "n_layers": int(self.config.get("n_layers", 5)),
-                "extra_features": bool(self.config.get("extra_features", True)),
-                "eigenfeatures": bool(self.config.get("eigenfeatures", True)),
+                "extra_features": bool(self.config.get("extra_features", True)) and use_structural_features,
+                "eigenfeatures": bool(self.config.get("eigenfeatures", True)) and use_structural_features,
                 "max_degree": int(self.config.get("max_degree", 10)),
                 "num_eigenvectors": int(self.config.get("num_eigenvectors", 5)),
                 "num_eigenvalues": int(self.config.get("num_eigenvalues", 9)),
@@ -573,7 +585,7 @@ class ConStructWrapper(BaseGenerator):
                 "rev_proj": rev_proj_value,
                 "dropout": float(self.config.get("dropout", 0.1)),
                 "dropout_in_and_out": bool(self.config.get("dropout_in_and_out", False)),
-                "cycle_features": bool(self.config.get("cycle_features", True)),
+                "cycle_features": bool(self.config.get("cycle_features", True)) and use_structural_features,
             },
             "dataset": {
                 "name": self.dataset,
@@ -909,15 +921,45 @@ class ConStructWrapper(BaseGenerator):
         self.model.eval()
 
     def train(self, train_graphs, val_graphs=None, test_graphs=None) -> None:
+        started_at = time.perf_counter()
+        self._log(
+            "train_start dataset=%s train=%d val=%s test=%s epochs=%s batch_size=%s extra_features=%s eigenfeatures=%s cycle_features=%s",
+            self.dataset,
+            len(train_graphs or []),
+            None if val_graphs is None else len(val_graphs),
+            None if test_graphs is None else len(test_graphs),
+            self.cfg.train.n_epochs,
+            self.cfg.train.batch_size,
+            self.cfg.model.extra_features,
+            self.cfg.model.eigenfeatures,
+            self.cfg.model.cycle_features,
+        )
         self._import_modules()
+        self._log("modules_imported duration=%.2fs", time.perf_counter() - started_at)
         random.seed(int(self.cfg.train.seed))
         np.random.seed(int(self.cfg.train.seed))
         torch.manual_seed(int(self.cfg.train.seed))
 
         train_arrays, val_arrays, test_arrays = self._split_arrays_for_meta(train_graphs, val_graphs, test_graphs)
+        self._log(
+            "splits_converted train=%d val=%d test=%d duration=%.2fs",
+            len(train_arrays),
+            len(val_arrays),
+            len(test_arrays),
+            time.perf_counter() - started_at,
+        )
         meta = self._build_meta(train_arrays, val_arrays, test_arrays)
+        self._log(
+            "meta_built max_n_nodes=%d atom_types=%d edge_types=%d duration=%.2fs",
+            meta.max_n_nodes,
+            meta.num_atom_types,
+            meta.num_edge_types,
+            time.perf_counter() - started_at,
+        )
         self._write_provenance(train_arrays, val_arrays, test_arrays, meta)
+        self._log("provenance_written data_root=%s duration=%.2fs", self.data_root, time.perf_counter() - started_at)
         self._build_model_from_meta(meta)
+        self._log("model_built parameters=%d duration=%.2fs", self._count_parameters(self.model), time.perf_counter() - started_at)
 
         if self.model is None:
             raise RuntimeError("ConStruct model was not initialized.")
@@ -934,8 +976,11 @@ class ConStructWrapper(BaseGenerator):
         last_train_loss = None
         last_val_loss = None
         for epoch in range(n_epochs):
+            epoch_started_at = time.perf_counter()
+            self._log("epoch_start epoch=%d/%d", epoch + 1, n_epochs)
             epoch_losses: list[float] = []
             for batch_idx, batch in enumerate(self._adj_arrays_to_batches(train_arrays, batch_size=batch_size, shuffle=True)):
+                batch_started_at = time.perf_counter()
                 optimizer.zero_grad(set_to_none=True)
                 loss, _ = self.model.loss_on_clean_batch(batch, log=False)
                 loss.backward()
@@ -943,6 +988,17 @@ class ConStructWrapper(BaseGenerator):
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), float(clip_grad))
                 optimizer.step()
                 epoch_losses.append(float(loss.detach().cpu()))
+                if batch_idx % self.log_train_every_n_steps == 0:
+                    self._log(
+                        "train_batch epoch=%d/%d batch=%d loss=%.6f X_shape=%s E_shape=%s duration=%.2fs",
+                        epoch + 1,
+                        n_epochs,
+                        batch_idx + 1,
+                        float(loss.detach().cpu()),
+                        tuple(batch.X.shape),
+                        tuple(batch.E.shape),
+                        time.perf_counter() - batch_started_at,
+                    )
             last_train_loss = float(np.mean(epoch_losses)) if epoch_losses else None
 
             if val_arrays and ((epoch + 1) % int(self.config.get("val_every", 10)) == 0 or epoch == n_epochs - 1):
@@ -954,9 +1010,19 @@ class ConStructWrapper(BaseGenerator):
                         val_losses.append(float(val_loss.detach().cpu()))
                 last_val_loss = float(np.mean(val_losses)) if val_losses else None
                 self.model.train()
+            if (epoch + 1) % self.log_epoch_every == 0 or epoch == 0 or epoch + 1 == n_epochs:
+                self._log(
+                    "epoch_end epoch=%d/%d train_loss=%s val_loss=%s duration=%.2fs",
+                    epoch + 1,
+                    n_epochs,
+                    last_train_loss,
+                    last_val_loss,
+                    time.perf_counter() - epoch_started_at,
+                )
 
         self.model.eval()
         self._save_checkpoint()
+        self._log("checkpoint_saved path=%s total_duration=%.2fs", self.checkpoint_path, time.perf_counter() - started_at)
         self.run_root.mkdir(parents=True, exist_ok=True)
         with open(self.run_root / "train_summary.json", "w", encoding="utf-8") as f:
             json.dump(
@@ -972,6 +1038,15 @@ class ConStructWrapper(BaseGenerator):
                 f,
                 indent=2,
             )
+
+    def _log(self, message: str, *args: Any) -> None:
+        if getattr(self, "detailed_logging", False):
+            LOGGER.info("ConStructWrapper " + message, *args)
+
+    def _count_parameters(self, model: torch.nn.Module | None) -> int:
+        if model is None:
+            return 0
+        return int(sum(p.numel() for p in model.parameters()))
 
     def sample(self, num_graphs: int, seed: int = 0, progress_callback=None):
         if self.model is None:

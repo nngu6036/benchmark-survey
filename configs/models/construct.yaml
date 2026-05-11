@@ -18,6 +18,9 @@ weight_decay: 1.0e-12
 clip_grad: null
 val_every: 10
 nodes_dist_source: train  # train is benchmark-fair; upstream ConStruct used all splits.
+detailed_logging: true
+log_train_every_n_steps: 1
+log_epoch_every: 1
 
 # Discrete diffusion
 transition: absorbing_edges
@@ -59,6 +62,12 @@ num_degree: 10
 num_eigenvectors: 5
 num_eigenvalues: 9
 cycle_features: true
+
+# QM9/ZINC are attributed molecular graphs. The generic ConStruct wrapper can
+# train on their categorical node/bond labels, but structural eigen/cycle
+# auxiliary features are expensive on large molecular splits and are not
+# molecular-domain features, so they are disabled for molecular datasets by default.
+disable_structural_features_for_molecular: true
 
 capabilities:
   supports_graph_labels: false

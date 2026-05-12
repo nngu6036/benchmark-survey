@@ -50,6 +50,7 @@ loss_type:
   x: const
   adj: default
 log_every: 10
+batch_log_every: 50
 
 # Diffusion mixture. num_scales overrides both x_num_scales and adj_num_scales.
 # Set to 1000 to match the upstream SBM/planar configs.

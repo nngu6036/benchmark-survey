@@ -339,10 +339,27 @@ class GruMWrapper:
         if not test_split:
             test_split = list(val_split)
 
+        print(
+            f"[GruM:{self.dataset_name}] preparing {len(train_split)} train / "
+            f"{len(val_split)} val / {len(test_split)} test graphs",
+            flush=True,
+        )
         config = self._build_config(train_split)
+        print(
+            f"[GruM:{self.dataset_name}] config resolved: max_node_num={int(config.data.max_node_num)} "
+            f"batch_size={int(config.data.batch_size)} epochs={int(config.train.num_epochs)} "
+            f"feat_types={list(config.data.feat.type)}",
+            flush=True,
+        )
         self._write_provenance(train_split, val_split, test_split, config)
 
+        print(f"[GruM:{self.dataset_name}] building training tensors", flush=True)
         train_x, train_adj, train_mask = self._graphs_to_tensors(train_split, config)
+        print(
+            f"[GruM:{self.dataset_name}] tensors ready: x={tuple(train_x.shape)} "
+            f"adj={tuple(train_adj.shape)}",
+            flush=True,
+        )
         dataset = TensorDataset(train_x, train_adj, train_mask)
         loader = DataLoader(
             dataset,
@@ -369,6 +386,7 @@ class GruMWrapper:
         history: List[Dict[str, float]] = []
         num_epochs = int(config.train.num_epochs)
         log_every = int(self._cfg("log_every", max(1, min(50, num_epochs))))
+        batch_log_every = int(self._cfg("batch_log_every", 50))
         grad_clip = float(config.train.grad_norm) if float(config.train.grad_norm) > 0 else None
 
         model.train()
@@ -392,6 +410,13 @@ class GruMWrapper:
                 losses_total.append(float(loss.detach().cpu()))
                 losses_x.append(float(loss_x.detach().cpu()))
                 losses_adj.append(float(loss_adj.detach().cpu()))
+                if batch_log_every > 0 and (len(losses_total) % batch_log_every == 0):
+                    print(
+                        f"[GruM:{self.dataset_name}] epoch {epoch + 1}/{num_epochs} "
+                        f"batch {len(losses_total)}/{len(loader)} "
+                        f"loss={float(np.mean(losses_total)):.4e}",
+                        flush=True,
+                    )
             if scheduler is not None:
                 scheduler.step()
             epoch_stats = {
@@ -405,7 +430,8 @@ class GruMWrapper:
                 print(
                     f"[GruM:{self.dataset_name}] epoch {epoch + 1}/{num_epochs} "
                     f"loss={epoch_stats['loss']:.4e} x={epoch_stats['loss_x']:.4e} "
-                    f"adj={epoch_stats['loss_adj']:.4e}"
+                    f"adj={epoch_stats['loss_adj']:.4e}",
+                    flush=True,
                 )
 
         metadata = self._metadata(train_split, val_split, test_split, config)
@@ -578,6 +604,8 @@ class GruMWrapper:
         max_nodes_in_data = max(g.number_of_nodes() for g in train_graphs)
         cfg["data"]["data"] = self.dataset_name
         base_max_nodes = int(cfg["data"].get("max_node_num", max_nodes_in_data))
+        if self.config.get("base_config") is None and self.dataset_name not in {"sbm", "planar", "proteins"}:
+            base_max_nodes = max_nodes_in_data
         explicit_max_nodes = self.config.get("max_node_num")
         if explicit_max_nodes is None:
             cfg["data"]["max_node_num"] = max(base_max_nodes, max_nodes_in_data)

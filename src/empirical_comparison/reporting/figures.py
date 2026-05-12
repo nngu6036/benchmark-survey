@@ -27,7 +27,7 @@ def bar_plot_metric(df: pd.DataFrame, metric: str, output_path: str | Path) -> P
 def make_default_metric_plots(
     csv_path: str | Path = "outputs/tables/aggregated_results.csv",
     output_dir: str | Path = "outputs/figures",
-    metrics: Iterable[str] = ("degree_mmd", "clustering_mmd", "spectral_mmd", "learned_feature_mmd", "classifier_auc_mean"),
+    metrics: Iterable[str] = ("degree_mmd", "clustering_mmd", "spectral_mmd", "learned_feature_mmd", "pgs_js_distance"),
 ) -> list[Path]:
     df = pd.read_csv(csv_path)
     out_dir = Path(output_dir)

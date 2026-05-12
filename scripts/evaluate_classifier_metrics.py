@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -60,19 +59,46 @@ def _subsample(graphs: list, max_graphs: int | None, seed: int) -> list:
     return [graphs[i] for i in idx]
 
 
-def _numeric_mean_std(split_payloads: list[dict]) -> dict[str, float]:
-    values_by_key: dict[str, list[float]] = defaultdict(list)
+def _pgs_js_mean_std(split_payloads: list[dict]) -> dict[str, float]:
+    values: list[float] = []
     for payload in split_payloads:
-        for key, value in (payload.get("results") or {}).items():
-            if isinstance(value, (int, float, np.number)):
-                values_by_key[key].append(float(value))
-    out: dict[str, float] = {}
-    for key, vals in values_by_key.items():
-        arr = np.asarray(vals, dtype=np.float64)
-        out[key] = float(arr.mean())
-        out[f"{key}_split_mean"] = float(arr.mean())
-        out[f"{key}_split_std"] = float(arr.std(ddof=0))
-    return out
+        results = payload.get("results") or {}
+        value = results.get("pgs_js_distance", results.get("polygraphscore"))
+        if isinstance(value, (int, float, np.number)):
+            values.append(float(value))
+    if not values:
+        raise RuntimeError("PGS-JS evaluation did not produce any numeric pgs_js_distance values.")
+    arr = np.asarray(values, dtype=np.float64)
+    mean = float(arr.mean())
+    return {
+        "pgs_js_distance": mean,
+        "pgs_js_distance_split_mean": mean,
+        "pgs_js_distance_split_std": float(arr.std(ddof=0)),
+    }
+
+
+def _strip_to_pgs_js(payload: dict) -> dict:
+    results = payload.get("results") or {}
+    score = results.get("pgs_js_distance", results.get("polygraphscore"))
+    clean_descriptors = []
+    for item in payload.get("descriptor_results", []):
+        clean_descriptors.append({
+            "descriptor": item.get("descriptor"),
+            "cv_score": item.get("cv_score"),
+            "cv_score_std": item.get("cv_score_std"),
+            "test_score": item.get("test_score"),
+            "classifier": item.get("classifier"),
+            "num_fit_graphs_per_class": item.get("num_fit_graphs_per_class"),
+            "num_test_graphs_per_class": item.get("num_test_graphs_per_class"),
+            "feature_dim": item.get("feature_dim"),
+        })
+    return {
+        "results": {"pgs_js_distance": float(score)} if isinstance(score, (int, float, np.number)) else {},
+        "descriptor_results": clean_descriptors,
+        "best_descriptor": payload.get("best_descriptor"),
+        "classifier": payload.get("classifier"),
+        "skipped_descriptors": payload.get("skipped_descriptors", {}),
+    }
 
 
 def _descriptor_summary(split_payloads: list[dict]) -> dict[str, dict[str, float]]:
@@ -125,7 +151,7 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
         descriptor_names = [d for d in descriptor_names if str(d).lower() not in {"attributes", "attribute", "attrs"}]
 
     logger.info(
-        "Evaluating PGS: dataset=%s model=%s ref_split=%s ref=%d gen=%d partitions=%d classifier=%s mode=%s",
+        "Evaluating PGS-JS: dataset=%s model=%s ref_split=%s ref=%d gen=%d partitions=%d classifier=%s",
         args.dataset,
         args.model,
         args.reference_split,
@@ -133,7 +159,6 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
         len(gen_graphs),
         args.num_splits,
         args.classifier,
-        args.mode,
     )
 
     descriptor_cfg = DescriptorConfig(
@@ -155,41 +180,32 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
             gen_graphs,
             descriptor_names=descriptor_names,
             descriptor_config=descriptor_cfg,
-            mode=args.mode,
             classifier=args.classifier,
             cv_folds=args.cv_folds,
             seed=split_seed,
             skip_unavailable=True,
             device=args.device,
         )
+        pgs_payload = _strip_to_pgs_js(pgs_payload)
         pgs_payload["split_id"] = split_id
         pgs_payload["seed"] = split_seed
         split_payloads.append(pgs_payload)
         logger.info(
-            "pgs_partition=%d pgs=%.4f selected=%s classifier=%s",
+            "pgs_js_partition=%d pgs_js=%.4f selected=%s classifier=%s",
             split_id,
-            float(pgs_payload["results"].get("polygraphscore", float("nan"))),
+            float(pgs_payload["results"].get("pgs_js_distance", float("nan"))),
             pgs_payload.get("best_descriptor"),
             pgs_payload.get("classifier"),
         )
 
-    results = _numeric_mean_std(split_payloads)
-    # Compatibility aliases for the table/reporter.
-    if "polygraphscore" in results:
-        results["polygraphscore_mean"] = results["polygraphscore"]
-        results["polygraphscore_std"] = results.get("polygraphscore_split_std", 0.0)
-        results["pgs_mean"] = results["polygraphscore"]
-        results["pgs_std"] = results.get("polygraphscore_split_std", 0.0)
-    if "pgs_js_distance" in results:
-        results["pgs_js_distance_mean"] = results["pgs_js_distance"]
-        results["pgs_js_distance_std"] = results.get("pgs_js_distance_split_std", 0.0)
+    results = _pgs_js_mean_std(split_payloads)
 
     payload = {
         "dataset": args.dataset,
         "model": args.model,
         "metric_family": "polygraphscore_classifier",
         "runtime_seconds": time.perf_counter() - start,
-        "metric_name": "PolyGraphScore",
+        "metric_name": "PGS-JS",
         "feature_representation": {
             "name": "descriptor_wise_polygraphscore",
             "descriptors_requested": descriptor_names,
@@ -212,7 +228,7 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
             "descriptor_selection": "Select descriptor with maximum CV lower-bound score, then report its held-out test score.",
             "num_repeated_partitions": int(args.num_splits),
             "cv_folds_on_fit_set": args.cv_folds,
-            "mode": args.mode,
+            "mode": "jsd",
             "seed": seed,
         },
         "graph_attributes": {
@@ -221,9 +237,8 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
             "generated_attribute_coverage": attribute_coverage(gen_graphs, attr_schema),
         },
         "interpretation": {
-            "polygraphscore": "Paper-style PGS: JS-distance lower-bound estimate in [0, 1]; lower is closer to the reference distribution.",
+            "pgs_js_distance": "Paper-style PGS-JS distance lower-bound estimate in [0, 1]; lower is closer to the reference distribution.",
             "pgs_best_descriptor": "Descriptor selected by highest cross-validation score on the fit set for each partition.",
-            "classifier_auc": "Diagnostic only; 0.5 is indistinguishable and 1.0 is highly separable.",
         },
         "results": results,
         "descriptor_summary": _descriptor_summary(split_payloads),
@@ -237,7 +252,7 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate paper-style PolyGraphScore classifier metrics.")
+    parser = argparse.ArgumentParser(description="Evaluate paper-style PGS-JS classifier metric.")
     parser.add_argument("--model", required=True, choices=available_models())
     parser.add_argument("--dataset", required=True, choices=available_datasets())
     parser.add_argument("--dataset-root", type=str, default="outputs/datasets")
@@ -250,7 +265,6 @@ def main() -> None:
     parser.add_argument("--skip-orbits", action="store_true", help="Skip ORCA orbit descriptors even if listed/defaulted.")
     parser.add_argument("--orca-exec", type=str, default=None)
     parser.add_argument("--classifier", choices=["auto", "tabpfn", "logistic_regression", "logistic", "lr"], default="auto")
-    parser.add_argument("--mode", choices=["jsd", "tv"], default="jsd")
     parser.add_argument("--cv-folds", type=int, default=4)
     parser.add_argument("--degree-bins", type=int, default=100)
     parser.add_argument("--clustering-bins", type=int, default=100)

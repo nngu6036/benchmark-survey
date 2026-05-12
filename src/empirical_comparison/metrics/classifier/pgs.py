@@ -10,7 +10,6 @@ from typing import Any, Sequence
 import networkx as nx
 import numpy as np
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, log_loss, roc_auc_score, roc_curve
 from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -229,70 +228,15 @@ def _js_score(prob_generated: np.ndarray, y_true: np.ndarray) -> dict[str, float
     mean_ll_base2 = float(np.mean(np.log2(p_true)))
     js_div = float(np.clip(mean_ll_base2 + 1.0, 0.0, 1.0))
     score = float(np.sqrt(js_div))
-    try:
-        auc = float(roc_auc_score(y, p))
-    except Exception:
-        auc = 0.5
-    pred = (p >= 0.5).astype(int)
     return {
         "score": score,
-        "polygraphscore": score,
-        "pgs": score,
         "pgs_js_distance": score,
-        "pgs_js_divergence_lower_bound": js_div,
-        "classifier_log_likelihood_base2": mean_ll_base2,
-        "classifier_log_loss": float(log_loss(y, np.vstack([1.0 - p, p]).T, labels=[0, 1])),
-        "classifier_auc": auc,
-        "classifier_accuracy": float(accuracy_score(y, pred)),
-        "classifier_separation": float(2.0 * abs(auc - 0.5)),
     }
 
 
-def _best_informedness_threshold(prob_generated: np.ndarray, y_true: np.ndarray) -> tuple[float, float]:
-    y = np.asarray(y_true, dtype=int)
-    p = np.asarray(prob_generated, dtype=np.float64)
-    try:
-        fpr, tpr, thr = roc_curve(y, p)
-        j = tpr - fpr
-        idx = int(np.nanargmax(j))
-        return float(max(j[idx], 0.0)), float(thr[idx])
-    except Exception:
-        return 0.0, 0.5
-
-
-def _tv_score(prob_generated: np.ndarray, y_true: np.ndarray, threshold: float | None = None) -> dict[str, float]:
-    p = np.asarray(prob_generated, dtype=np.float64)
-    y = np.asarray(y_true, dtype=int)
-    if threshold is None:
-        score, threshold = _best_informedness_threshold(p, y)
-    else:
-        pred = p >= float(threshold)
-        pos = pred[y == 1].mean() if np.any(y == 1) else 0.0
-        neg = pred[y == 0].mean() if np.any(y == 0) else 0.0
-        score = float(max(pos - neg, 0.0))
-    try:
-        auc = float(roc_auc_score(y, p))
-    except Exception:
-        auc = 0.5
-    return {
-        "score": float(score),
-        "polygraphscore": float(score),
-        "pgs": float(score),
-        "pgs_tv": float(score),
-        "tv_threshold": float(threshold),
-        "classifier_auc": auc,
-        "classifier_accuracy": float(accuracy_score(y, (p >= 0.5).astype(int))),
-        "classifier_separation": float(2.0 * abs(auc - 0.5)),
-    }
-
-
-def _fit_predict_score(x_train, y_train, x_eval, y_eval, *, mode: str, classifier: str, seed: int, device: str | None = None) -> tuple[dict[str, float], str]:
+def _fit_predict_score(x_train, y_train, x_eval, y_eval, *, classifier: str, seed: int, device: str | None = None) -> tuple[dict[str, float], str]:
     clf = _ProbabilisticClassifier(classifier, random_state=seed, device=device).fit(x_train, y_train)
     probs_eval = clf.predict_proba_generated(x_eval)
-    if mode == "tv":
-        probs_train = clf.predict_proba_generated(x_train)
-        _, threshold = _best_informedness_threshold(probs_train, y_train)
-        return _tv_score(probs_eval, y_eval, threshold), clf.kind
     return _js_score(probs_eval, y_eval), clf.kind
 
 
@@ -309,7 +253,7 @@ def _split_ref_gen(ref_graphs: Sequence[nx.Graph], gen_graphs: Sequence[nx.Graph
     return ref[:half], ref[half:], gen[:half], gen[half:]
 
 
-def _descriptor_cv_and_test(ref_fit, ref_test, gen_fit, gen_test, *, descriptor_name: str, descriptor_config: DescriptorConfig, mode: str, classifier: str, cv_folds: int, seed: int, device: str | None = None) -> dict[str, Any]:
+def _descriptor_cv_and_test(ref_fit, ref_test, gen_fit, gen_test, *, descriptor_name: str, descriptor_config: DescriptorConfig, classifier: str, cv_folds: int, seed: int, device: str | None = None) -> dict[str, Any]:
     descriptor = PGSDescriptor(descriptor_name, descriptor_config).fit(ref_fit + gen_fit)
     x_fit = descriptor.transform(ref_fit + gen_fit)
     x_fit_bin, y_fit = _binary_features(x_fit[: len(ref_fit)], x_fit[len(ref_fit) :])
@@ -322,11 +266,11 @@ def _descriptor_cv_and_test(ref_fit, ref_test, gen_fit, gen_test, *, descriptor_
     cv_payloads = []
     resolved_classifiers = []
     for fold, (tr, va) in enumerate(cv.split(x_fit_bin, y_fit)):
-        score_payload, resolved = _fit_predict_score(x_fit_bin[tr], y_fit[tr], x_fit_bin[va], y_fit[va], mode=mode, classifier=classifier, seed=seed + fold, device=device)
+        score_payload, resolved = _fit_predict_score(x_fit_bin[tr], y_fit[tr], x_fit_bin[va], y_fit[va], classifier=classifier, seed=seed + fold, device=device)
         cv_scores.append(score_payload["score"])
         cv_payloads.append(score_payload)
         resolved_classifiers.append(resolved)
-    test_payload, resolved = _fit_predict_score(x_fit_bin, y_fit, x_test_bin, y_test, mode=mode, classifier=classifier, seed=seed + 10_000, device=device)
+    test_payload, resolved = _fit_predict_score(x_fit_bin, y_fit, x_test_bin, y_test, classifier=classifier, seed=seed + 10_000, device=device)
     return {
         "descriptor": descriptor_name,
         "cv_score": float(np.mean(cv_scores)),
@@ -342,19 +286,16 @@ def _descriptor_cv_and_test(ref_fit, ref_test, gen_fit, gen_test, *, descriptor_
     }
 
 
-def polygraphscore(ref_graphs: Sequence[nx.Graph], gen_graphs: Sequence[nx.Graph], *, descriptor_names: Sequence[str], descriptor_config: DescriptorConfig | None = None, mode: str = "jsd", classifier: str = "auto", cv_folds: int = 4, seed: int = 42, skip_unavailable: bool = True, device: str | None = None) -> dict[str, Any]:
+def polygraphscore(ref_graphs: Sequence[nx.Graph], gen_graphs: Sequence[nx.Graph], *, descriptor_names: Sequence[str], descriptor_config: DescriptorConfig | None = None, classifier: str = "auto", cv_folds: int = 4, seed: int = 42, skip_unavailable: bool = True, device: str | None = None) -> dict[str, Any]:
     if descriptor_config is None:
         descriptor_config = DescriptorConfig(seed=seed)
     descriptor_config.seed = seed
-    mode = mode.lower()
-    if mode not in {"jsd", "tv"}:
-        raise ValueError("mode must be 'jsd' or 'tv'.")
     ref_fit, ref_test, gen_fit, gen_test = _split_ref_gen(list(ref_graphs), list(gen_graphs), seed)
     results = []
     skipped: dict[str, str] = {}
     for name in descriptor_names:
         try:
-            results.append(_descriptor_cv_and_test(ref_fit, ref_test, gen_fit, gen_test, descriptor_name=str(name), descriptor_config=descriptor_config, mode=mode, classifier=classifier, cv_folds=cv_folds, seed=seed + 101 * (len(results) + 1), device=device))
+            results.append(_descriptor_cv_and_test(ref_fit, ref_test, gen_fit, gen_test, descriptor_name=str(name), descriptor_config=descriptor_config, classifier=classifier, cv_folds=cv_folds, seed=seed + 101 * (len(results) + 1), device=device))
         except Exception as exc:
             if not skip_unavailable:
                 raise
@@ -363,8 +304,7 @@ def polygraphscore(ref_graphs: Sequence[nx.Graph], gen_graphs: Sequence[nx.Graph
         raise RuntimeError(f"No PGS descriptors could be evaluated. Skipped: {skipped}")
     best = max(results, key=lambda d: d["cv_score"])
     out_results: dict[str, Any] = {
-        "polygraphscore": float(best["test_score"]),
-        "pgs": float(best["test_score"]),
+        "pgs_js_distance": float(best["test_score"]),
         "pgs_best_descriptor": best["descriptor"],
         "pgs_cv_selected_score": float(best["cv_score"]),
     }
@@ -381,5 +321,5 @@ def polygraphscore(ref_graphs: Sequence[nx.Graph], gen_graphs: Sequence[nx.Graph
         "best_descriptor": best["descriptor"],
         "classifier": best.get("classifier"),
         "skipped_descriptors": skipped,
-        "mode": mode,
+        "mode": "jsd",
     }

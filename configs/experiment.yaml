@@ -40,7 +40,6 @@ metrics:
     reference_split: test
     classifier: auto
     metric: polygraphscore
-    mode: jsd
     cv_folds: 4
     skip_orbits: true
     num_splits: 3

@@ -1,5 +1,4 @@
 metric: polygraphscore
-mode: jsd
 classifier: auto  # auto = TabPFN if installed, otherwise standardized logistic regression fallback
 reference_split: test
 num_splits: 3

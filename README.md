@@ -1,6 +1,6 @@
-# Survey Benchmark: repeated runs, attributed graphs, QM9/ZINC, and evaluation
+# Survey Benchmark: attributed graphs, QM9/ZINC, and evaluation
 
-This repository contains the empirical benchmark scaffold for the graph-generation survey. It supports repeated training runs, sampling manifests, descriptor/PGS/feature-space evaluation, and canonical attributed-graph handling for both synthetic graphs and molecular graphs.
+This repository contains the empirical benchmark scaffold for the graph-generation survey. It supports one checkpoint per model/dataset, sample metadata, descriptor/PGS/feature-space evaluation, and canonical attributed-graph handling for both synthetic graphs and molecular graphs.
 
 ## 1. Installation
 
@@ -76,23 +76,34 @@ PYTHONPATH=src python scripts/train_model.py --dataset sbm --model dummy
 PYTHONPATH=src python scripts/generate_samples.py --dataset sbm --model dummy --num-samples 1024 --force
 ```
 
-Repeated independent runs:
+Attributed molecular example:
 
 ```bash
 PYTHONPATH=src python scripts/train_model.py \
   --dataset qm9 \
-  --model disco \
-  --num-runs 5
+  --model disco
 
 PYTHONPATH=src python scripts/generate_samples.py \
   --dataset qm9 \
   --model disco \
-  --num-runs 5 \
   --num-samples 1024 \
+  --draw-trajectory \
+  --trajectory-graphs 2 \
+  --trajectory-steps 8 \
   --force
 ```
 
-`generate_samples.py` now displays a graph-level progress bar by default. Add `--no-progress` to disable it in non-interactive runs.
+`generate_samples.py` now displays a graph-level progress bar by default. Add `--no-progress` to disable it in non-interactive runs. `--draw-trajectory` saves a reference-to-sample visualization under `outputs/figures/trajectories/<dataset>/<model>_trajectory.png`.
+
+To visually inspect generated samples:
+
+```bash
+PYTHONPATH=src python scripts/draw_generated_graphs.py \
+  --dataset qm9 \
+  --model disco \
+  --num-graphs 16 \
+  --show-node-labels
+```
 
 A complete loop over all registered datasets and models can be run as follows:
 
@@ -105,12 +116,10 @@ for dataset in "${datasets[@]}"; do
   for model in "${models[@]}"; do
     PYTHONPATH=src python scripts/train_model.py \
       --dataset "$dataset" \
-      --model "$model" \
-      --num-runs 3
+      --model "$model"
     PYTHONPATH=src python scripts/generate_samples.py \
       --dataset "$dataset" \
       --model "$model" \
-      --num-runs 3 \
       --num-samples 1024 \
       --force
   done
@@ -132,7 +141,7 @@ For attributed datasets such as QM9 and ZINC, the benchmark still runs all wrapp
 
 ## 5. Evaluate all metric families
 
-All evaluation scripts accept the same dataset/model/run selection pattern. The commands below work for synthetic graphs (`sbm`, `planar`) and attributed molecular graphs (`qm9`, `zinc`) after samples have been generated.
+All evaluation scripts accept the same dataset/model selection pattern. The commands below work for synthetic graphs (`sbm`, `planar`) and attributed molecular graphs (`qm9`, `zinc`) after samples have been generated.
 
 Descriptor MMD metrics:
 
@@ -140,27 +149,25 @@ Descriptor MMD metrics:
 PYTHONPATH=src python scripts/evaluate_descriptor_metrics.py \
   --dataset qm9 \
   --model disco \
-  --num-runs 5 \
   --reference-split test \
   --skip-orbit
 ```
 
-This reports structural MMDs such as degree, clustering, spectral, structural summary, optional orbit MMD, and `attribute_mmd` when attributes are present. Use `--no-attribute-mmd` to disable the attribute descriptor.
+For synthetic datasets, this reports structural MMDs such as degree, clustering, spectral, structural summary, optional orbit MMD, and `attribute_mmd` when attributes are present. For QM9, this script reports only validity, uniqueness, novelty, atom-type MMD, and bond-type MMD.
 
-Classifier/PolyGraphScore-style metrics:
+Classifier/PGS-JS metric:
 
 ```bash
 PYTHONPATH=src python scripts/evaluate_classifier_metrics.py \
   --dataset qm9 \
   --model disco \
-  --num-runs 5 \
   --num-splits 5 \
   --cv-folds 4 \
   --classifier auto \
   --skip-orbits
 ```
 
-`--classifier auto` uses TabPFN when installed and otherwise falls back to standardized logistic regression. The default descriptor pool includes structural descriptors and an `attributes` descriptor when attributes are available.
+`--classifier auto` uses TabPFN when installed and otherwise falls back to standardized logistic regression. The script reports only `pgs_js_distance`; the default descriptor pool includes structural descriptors and an `attributes` descriptor when attributes are available.
 
 Learned/fallback feature-space MMD:
 
@@ -168,7 +175,6 @@ Learned/fallback feature-space MMD:
 PYTHONPATH=src python scripts/evaluate_learned_feature_metrics.py \
   --dataset qm9 \
   --model disco \
-  --num-runs 5 \
   --reference-split train
 ```
 
@@ -185,13 +191,11 @@ for dataset in "${datasets[@]}"; do
     PYTHONPATH=src python scripts/evaluate_descriptor_metrics.py \
       --dataset "$dataset" \
       --model "$model" \
-      --num-runs 3 \
       --skip-orbit
 
     PYTHONPATH=src python scripts/evaluate_classifier_metrics.py \
       --dataset "$dataset" \
       --model "$model" \
-      --num-runs 3 \
       --num-splits 5 \
       --cv-folds 4 \
       --classifier auto \
@@ -200,32 +204,106 @@ for dataset in "${datasets[@]}"; do
     PYTHONPATH=src python scripts/evaluate_learned_feature_metrics.py \
       --dataset "$dataset" \
       --model "$model" \
-      --num-runs 3 \
       --reference-split train
   done
 done
 ```
 
-Metric files are written under `outputs/metrics/<dataset>/<model>/`. For repeated runs, each run has its own result file and the scripts also write an aggregate JSON with mean/std across runs.
+Metric files are written under `outputs/metrics/<dataset>/<model>/`.
 
-## 6. Paper-style PolyGraphScore protocol
+Training and sampling metadata include hardware, runtime, normalized sampling time per 128 graphs, and peak memory fields for compute-budget reporting. After training and sampling the target rows, generate the LaTeX table with:
 
-`scripts/evaluate_classifier_metrics.py` implements a PolyGraphScore-style classifier protocol:
+```bash
+PYTHONPATH=src python scripts/make_compute_budget_table.py \
+  --datasets planar sbm \
+  --models graphguide digress construct edp_gnn disco grum
+```
+
+Model hyperparameters used by the benchmark wrappers are summarized below. Values come from `configs/models/*.yaml`; public upstream defaults are used only where the wrapper keeps the upstream model shape.
+
+```latex
+\begin{table}[http]
+\centering
+\caption{Model-specific hyperparameters used in the benchmark. Values follow the benchmark model configs, with public implementation defaults used for model-shape fields left unset by the wrapper.}
+\label{tab:appendix_model_hyperparameters}
+\small
+\resizebox{\textwidth}{!}{
+\begin{tabular}{l c c c c c c c}
+\toprule
+Model & Hidden dim. & Layers & Optimizer & Learning rate & Epochs & Noise / path schedule & Checkpoint rule \\
+\midrule
+GraphGUIDE &
+$256$; GAT hidden $32$, $8$ heads &
+$4$ GNN layers &
+Adam &
+$10^{-3}$ &
+$100$ &
+Bernoulli zero-skip; $t_{\max}=1000$, $a=100$, $b=10$ &
+Final checkpoint after training \\
+DiGress &
+$d_X=256$, $d_E=64$, $d_y=64$; MLP $(256,128,128)$ &
+$5$ transformer layers &
+AdamW &
+$2\times10^{-4}$ &
+$100$ &
+Discrete marginal diffusion; cosine schedule; $T=500$ &
+Final Lightning checkpoint saved by wrapper \\
+ConStruct &
+$d_X=256$, $d_E=64$, $d_y=64$; MLP $(256,128,128)$ &
+$5$ transformer layers &
+AdamW &
+$2\times10^{-4}$ &
+$100$ &
+Absorbing-edge discrete diffusion; $T=500$ &
+Final checkpoint after training \\
+EDP-GNN &
+GIN hidden $(16,16,16,16)$; channels $(2,4,4,4,2)$ &
+$4$ GIN blocks &
+Adam + exponential LR decay &
+$10^{-3}$ &
+$100$ &
+Score noise $\sigma\in\{0.1,0.2,0.4,0.6,0.8,1.6\}$; Langevin $1000$ steps &
+Final checkpoint after training \\
+DisCo &
+$n_{\mathrm{dim}}=128$; GT $(d_X,d_E,d_y)=(256,64,64)$ &
+$5$ graph-transformer layers &
+AdamW &
+$2\times10^{-4}$ &
+$100$ &
+Marginal CTMC; $t_{\min}=0.01$; $50$ sampling steps; $\beta=2.0$, $\alpha=0.8$ &
+Best validation loss, or best training loss without validation \\
+GruM &
+$d_X=256$, $d_E=64$, $d_y=64$; MLP $(128,64,128)$ &
+$8$ transformer layers &
+AdamW &
+$2\times10^{-4}$ &
+$100$ &
+OU bridge, $1000$ scales; $X:\sigma_0=0.2,\sigma_1=0.1$; $A:\sigma_0=0.4,\sigma_1=0.2$; Euler TV sampler &
+Final checkpoint with EMA state \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+```
+
+## 6. Paper-style PGS-JS protocol
+
+`scripts/evaluate_classifier_metrics.py` implements a PGS-JS classifier protocol:
 
 1. Load reference and generated graphs.
 2. Randomly split each class into fit and held-out test halves.
 3. For each descriptor, run stratified cross-validation on the fit half.
 4. Select the descriptor with the best validation score.
 5. Train the final classifier on the full fit half for the selected descriptor.
-6. Report the selected descriptor's held-out test score.
+6. Report the selected descriptor's held-out PGS-JS distance.
 
-The default mode is Jensen-Shannon distance, reported as `polygraphscore`, `pgs`, and `pgs_js_distance`; lower is better.
+The only reported benchmark metric is `pgs_js_distance`; lower is better.
 
 ## 7. Useful output locations
 
 ```text
-outputs/checkpoints/<dataset>/<model>/...   # trained checkpoints, run-aware when --num-runs > 1
+outputs/checkpoints/<dataset>/<model>/...   # trained checkpoint for each model/dataset
 outputs/samples/<dataset>/...               # generated graph pickles and sample metadata
 outputs/runs/<dataset>/<model>/...          # resolved train configs and training metadata
-outputs/metrics/<dataset>/<model>/...       # metric payloads and aggregate mean/std files
+outputs/metrics/<dataset>/<model>/...       # metric payloads
 ```

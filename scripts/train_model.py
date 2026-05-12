@@ -17,6 +17,7 @@ from empirical_comparison.evaluation.run_utils import (
 )
 from empirical_comparison.graphs.attributes import attribute_coverage, canonicalize_graph_attributes, fit_attribute_statistics, normalize_schema
 from empirical_comparison.registry import get_model_class, available_datasets, available_models
+from empirical_comparison.utils.compute import PeakMemoryMonitor, compute_report
 from empirical_comparison.utils.io import load_yaml, save_json, save_yaml, stable_hash
 from empirical_comparison.utils.logging import get_logger
 from empirical_comparison.utils.seed import set_seed
@@ -86,8 +87,15 @@ def _train_one_run(
     model_cls = get_model_class(model_name)
     model = model_cls(model_cfg)
     start = time.perf_counter()
-    model.train(splits["train"], splits.get("val"), splits.get("test"))
+    with PeakMemoryMonitor() as memory_monitor:
+        model.train(splits["train"], splits.get("val"), splits.get("test"))
     elapsed = time.perf_counter() - start
+    compute = compute_report(
+        operation="training",
+        runtime_seconds=elapsed,
+        num_graphs=len(splits.get("train", [])),
+        memory=memory_monitor.to_dict(),
+    )
 
     run_dir = run_output_dir(dataset, model_name)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -97,6 +105,21 @@ def _train_one_run(
         "model": model_name,
         "seed": seed,
         "runtime_seconds": elapsed,
+        "training_time_seconds": elapsed,
+        "training_time_minutes": elapsed / 60.0,
+        "hardware": compute["hardware_label"],
+        "peak_memory_mib": compute.get("peak_memory_mib"),
+        "compute": compute,
+        "compute_budget": {
+            "dataset": dataset,
+            "model": model_name,
+            "hardware": compute["hardware_label"],
+            "training_time_seconds": elapsed,
+            "training_time_minutes": elapsed / 60.0,
+            "sampling_time_per_128_graphs_seconds": None,
+            "peak_memory_mib": compute.get("peak_memory_mib"),
+            "notes": "Training run measured by scripts/train_model.py.",
+        },
         "checkpoint_path": model_cfg.get("checkpoint_path"),
         "model_config_path": str(model_cfg_path),
         "model_config_hash": stable_hash(model_cfg),

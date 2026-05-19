@@ -27,12 +27,13 @@ MODEL_NAMES = {
 }
 
 METRIC_COLUMNS = [
-    ("dataset_validity_rate", r"\makecell{Validity\\$\uparrow$}"),
-    ("uniqueness_rate", r"\makecell{Uniqueness\\$\uparrow$}"),
-    ("novelty_rate", r"\makecell{Novelty\\$\uparrow$}"),
-    ("atom_type_mmd", r"\makecell{Atom-type\\MMD $\downarrow$}"),
-    ("bond_type_mmd", r"\makecell{Bond-type\\MMD $\downarrow$}"),
-    ("learned_feature_mmd", r"\makecell{Feature-\\space\\MMD $\downarrow$}"),
+    ("degree_mmd", r"\makecell{Degree\\MMD}"),
+    ("clustering_mmd", r"\makecell{Clustering\\MMD}"),
+    ("orbit_mmd", r"\makecell{Orbit\\MMD}"),
+    ("spectral_mmd", r"\makecell{Spectral\\MMD}"),
+    ("atom_type_mmd", r"\makecell{Atom-type\\MMD}"),
+    ("bond_type_mmd", r"\makecell{Bond-type\\MMD}"),
+    ("learned_feature_mmd", r"\makecell{Feature-\\space\\MMD}"),
     ("pgs_js_distance", r"\makecell{PGS-JS\\$\downarrow$}"),
 ]
 
@@ -94,15 +95,15 @@ def _latex(dataset_rows: dict[str, dict[str, str]], models: list[str], *, mean_s
             r"\begin{table*}[t]",
             r"\centering",
             (
-                r"\caption{Illustrative reporting template for the QM9 molecular benchmark. Higher is better for validity, "
-                r"uniqueness, and novelty; lower is better for MMD, feature-space MMD, and PGS-JS. GraphGUIDE and "
-                r"EDP-GNN are omitted because their current benchmark implementations do not support attributed molecular graphs.}"
+                r"\caption{Illustrative reporting template for the QM9 molecular benchmark. Lower is better for all reported "
+                r"metrics. GraphGUIDE and EDP-GNN are omitted because their current benchmark implementations do not support "
+                r"attributed molecular graphs.}"
             ),
             r"\label{tab:qm9_benchmark_results}",
             r"\small",
-            r"\setlength{\tabcolsep}{3.0pt}",
+            r"\setlength{\tabcolsep}{2.5pt}",
             r"\renewcommand{\arraystretch}{1.12}",
-            r"\begin{tabularx}{\textwidth}{l *{7}{>{\centering\arraybackslash}X}}",
+            r"\begin{tabularx}{\textwidth}{l *{8}{>{\centering\arraybackslash}X}}",
             r"\toprule",
             " & ".join(header) + r" \\",
             r"\midrule",

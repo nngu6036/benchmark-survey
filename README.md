@@ -219,6 +219,17 @@ PYTHONPATH=src python scripts/make_compute_budget_table.py \
   --models graphguide digress construct edp_gnn disco grum
 ```
 
+After metric evaluation, aggregate the JSON metric outputs and generate the QM9 molecular benchmark table with:
+
+```bash
+PYTHONPATH=src python scripts/aggregate_results.py
+PYTHONPATH=src python scripts/make_molecular_benchmark_table.py \
+  --dataset qm9 \
+  --models digress construct disco grum
+```
+
+The molecular table is written to `outputs/tables/qm9_benchmark_results.tex`. Missing metric values are rendered as `--`, and GraphGUIDE/EDP-GNN are intentionally omitted from the default QM9 table because the current benchmark implementations do not support attributed molecular graphs.
+
 Model hyperparameters used by the benchmark wrappers are summarized below. Values come from `configs/models/*.yaml`; public upstream defaults are used only where the wrapper keeps the upstream model shape.
 
 ```latex

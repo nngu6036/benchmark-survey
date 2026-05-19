@@ -44,7 +44,7 @@ QM9_COLUMNS = [
     ("atom_type_mmd", r"\makecell{Atom-type\\MMD $\downarrow$}"),
     ("bond_type_mmd", r"\makecell{Bond-type\\MMD $\downarrow$}"),
     ("learned_feature_mmd", r"\makecell{Feature-\\space\\MMD $\downarrow$}"),
-    ("pgs_js_distance", r"\makecell{PGS-style\\JS $\downarrow$}"),
+    ("pgs_js_distance", r"\makecell{PGS-JS\\$\downarrow$}"),
 ]
 
 
@@ -184,11 +184,11 @@ def main() -> None:
             qm9_df,
             metric_columns=QM9_COLUMNS,
             caption=(
-                "Illustrative reporting table for the QM9 molecular benchmark. Higher is better for validity, uniqueness, and novelty; "
-                "lower is better for discrepancy metrics."
+                "Illustrative comparison on molecular graph benchmarks. Higher is better for validity, uniqueness, and novelty; "
+                "lower is better for MMD, feature-space MMD, and PGS-JS."
             ),
             label="tab:qm9_benchmark_results",
-            include_dataset=False,
+            include_dataset=True,
             mean_std=args.mean_std,
         ),
     ]

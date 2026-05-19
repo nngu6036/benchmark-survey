@@ -290,78 +290,6 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
         len(gen_graphs),
     )
 
-    if str(args.dataset).lower() == "qm9":
-        results: dict[str, float | None] = {}
-        debug: dict[str, dict] = {}
-        if attr_stats.node_label_values:
-            node_values = [str(i) for i in range(len(attr_stats.node_label_values))]
-            metric, metric_debug = _compute_label_mmd(
-                name="atom_type_mmd",
-                ref_graphs=ref_graphs,
-                gen_graphs=gen_graphs,
-                attr_schema=attr_schema,
-                scope="node",
-                values=node_values,
-                sigma=args.sigma,
-                num_bootstrap=args.num_bootstrap,
-                seed=seed,
-            )
-            results.update(metric)
-            debug["atom_type_mmd"] = metric_debug
-        if attr_stats.edge_label_values:
-            edge_values = [str(i + 1) for i in range(len(attr_stats.edge_label_values))]
-            metric, metric_debug = _compute_label_mmd(
-                name="bond_type_mmd",
-                ref_graphs=ref_graphs,
-                gen_graphs=gen_graphs,
-                attr_schema=attr_schema,
-                scope="edge",
-                values=edge_values,
-                sigma=args.sigma,
-                num_bootstrap=args.num_bootstrap,
-                seed=seed,
-            )
-            results.update(metric)
-            debug["bond_type_mmd"] = metric_debug
-        results.update(_qm9_quality_metrics(gen_graphs, train_graphs, attr_schema, attr_stats))
-        elapsed = time.perf_counter() - start
-        payload = {
-            "dataset": args.dataset,
-            "model": args.model,
-            "metric_family": "qm9_molecular_descriptor",
-            "num_reference_graphs": len(ref_graphs),
-            "num_generated_graphs": len(gen_graphs),
-            "runtime_seconds": elapsed,
-            "protocol": {
-                "seed": seed,
-                "reference_split": args.reference_split,
-                "max_graphs": args.max_graphs,
-                "sigma": args.sigma,
-                "num_bootstrap": args.num_bootstrap,
-                "qm9_metrics": ["validity_rate", "uniqueness_rate", "novelty_rate", "atom_type_mmd", "bond_type_mmd"],
-                "validity_note": "Validity is a lightweight QM9 valence check over generated node labels and bond types.",
-                "attribute_schema": attr_schema,
-            },
-            "notes": {
-                "atom_type_mmd": "RBF MMD over per-graph atom-type histograms.",
-                "bond_type_mmd": "RBF MMD over per-graph bond-type histograms.",
-                "uniqueness_rate": "Fraction of valid generated molecules with unique labeled graph fingerprints.",
-                "novelty_rate": "Fraction of valid generated molecules whose labeled graph fingerprint is absent from the training split.",
-            },
-            "graph_attributes": {
-                "schema": attr_schema,
-                "reference_attribute_coverage": attribute_coverage(ref_graphs, attr_schema),
-                "generated_attribute_coverage": attribute_coverage(gen_graphs, attr_schema),
-            },
-            "debug": debug,
-            "results": results,
-        }
-        if output_path is None:
-            output_path = metric_path(args.dataset, args.model, METRIC_FILENAME)
-        save_json(payload, output_path)
-        logger.info("Saved QM9 molecular metrics to %s in %.2fs", output_path, elapsed)
-        return payload
-
     descriptor_specs: dict[str, tuple[Callable[[nx.Graph], np.ndarray], str]] = {
         "degree_mmd": (lambda g: degree_histogram(g, bins=args.degree_bins, max_degree=args.max_degree), "emd"),
         "clustering_mmd": (lambda g: clustering_histogram(g, bins=args.clustering_bins), "emd"),
@@ -388,7 +316,7 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
             "rbf",
         )
 
-    results: dict[str, float] = {}
+    results: dict[str, float | int | None] = {}
     debug: dict[str, dict] = {}
     for name, (fn, metric_kind) in descriptor_specs.items():
         logger.info("Computing %s", name)
@@ -444,7 +372,10 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
         results.update(metric)
         debug["bond_type_mmd"] = metric_debug
 
-    results.update(quality_metrics(gen_graphs, reference_graphs=train_graphs, dataset=args.dataset))
+    quality = quality_metrics(gen_graphs, reference_graphs=train_graphs, dataset=args.dataset)
+    if str(args.dataset).lower() == "qm9":
+        quality.update(_qm9_quality_metrics(gen_graphs, train_graphs, attr_schema, attr_stats))
+    results.update(quality)
     elapsed = time.perf_counter() - start
     payload = {
         "dataset": args.dataset,
@@ -468,12 +399,16 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
             "skip_orbit": args.skip_orbit,
             "orbit_log_transform": args.orbit_log_transform,
             "attribute_mmd": not args.no_attribute_mmd,
+            "qm9_molecular_validity": str(args.dataset).lower() == "qm9",
             "attribute_schema": attr_schema,
         },
         "notes": {
             "orbit_mmd": "ORCA-based 4-node orbit-count MMD when ORCA is configured; otherwise skipped.",
             "structural_summary_mmd": "Lightweight structural-summary fallback, not a graphlet/orbit metric.",
             "attribute_mmd": "RBF MMD over node/edge attribute histograms and continuous attribute moments when attributes are present.",
+            "atom_type_mmd": "RBF MMD over per-graph atom-type histograms when node labels are present.",
+            "bond_type_mmd": "RBF MMD over per-graph bond-type histograms when edge labels are present.",
+            "qm9_validity": "For QM9, validity/uniqueness/novelty use a lightweight valence check over generated node labels and bond types.",
         },
         "graph_attributes": {
             "schema": attr_schema,

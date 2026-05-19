@@ -153,7 +153,7 @@ PYTHONPATH=src python scripts/evaluate_descriptor_metrics.py \
   --skip-orbit
 ```
 
-For synthetic datasets, this reports structural MMDs such as degree, clustering, spectral, structural summary, optional orbit MMD, and `attribute_mmd` when attributes are present. For QM9, this script reports only validity, uniqueness, novelty, atom-type MMD, and bond-type MMD.
+For all datasets, this reports the shared descriptor schema: degree MMD, clustering MMD, spectral MMD, structural-summary MMD, optional orbit MMD, and `attribute_mmd` when attributes are present. Molecular datasets such as QM9 additionally report validity, uniqueness, novelty, atom-type MMD, and bond-type MMD using the benchmark graph-attribute schema.
 
 Classifier/PGS-JS metric:
 
@@ -219,7 +219,14 @@ PYTHONPATH=src python scripts/make_compute_budget_table.py \
   --models graphguide digress construct edp_gnn disco grum
 ```
 
-After metric evaluation, aggregate the JSON metric outputs and generate the QM9 molecular benchmark table with:
+After metric evaluation, aggregate the JSON metric outputs and generate the benchmark LaTeX tables with:
+
+```bash
+PYTHONPATH=src python scripts/aggregate_results.py
+PYTHONPATH=src python scripts/make_latex_tables.py
+```
+
+To generate only the QM9 molecular reporting table, run:
 
 ```bash
 PYTHONPATH=src python scripts/aggregate_results.py

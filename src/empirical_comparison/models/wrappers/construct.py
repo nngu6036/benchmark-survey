@@ -108,6 +108,13 @@ def _safe_symmetric_eigh(matrix: torch.Tensor) -> tuple[torch.Tensor, torch.Tens
     return torch.stack(eigvals, dim=0), torch.stack(eigvectors, dim=0)
 
 
+def _finite_tensor(tensor: torch.Tensor, limit: float | None = None) -> torch.Tensor:
+    tensor = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+    if limit is not None:
+        tensor = torch.clamp(tensor, min=-limit, max=limit)
+    return tensor
+
+
 class _PlaceHolder:
     """Minimal ConStruct-compatible dense graph container.
 
@@ -347,9 +354,18 @@ class _DenseConStructModel(torch.nn.Module):
         extra_features = self.extra_features(z_t)
         extra_domain_features = self.domain_features(z_t)
         model_input = z_t.copy()
-        model_input.X = torch.cat((z_t.X, z_t.charges, extra_features.X, extra_domain_features.X), dim=2).float()
-        model_input.E = torch.cat((z_t.E, extra_features.E, extra_domain_features.E), dim=3).float()
-        model_input.y = torch.hstack((z_t.y, extra_features.y, extra_domain_features.y, z_t.t)).float()
+        model_input.X = _finite_tensor(
+            torch.cat((z_t.X, z_t.charges, extra_features.X, extra_domain_features.X), dim=2).float(),
+            limit=1.0e4,
+        )
+        model_input.E = _finite_tensor(
+            torch.cat((z_t.E, extra_features.E, extra_domain_features.E), dim=3).float(),
+            limit=1.0e4,
+        )
+        model_input.y = _finite_tensor(
+            torch.hstack((z_t.y, extra_features.y, extra_domain_features.y, z_t.t)).float(),
+            limit=1.0e4,
+        )
         return self.model(model_input)
 
     def loss_on_clean_batch(self, clean_data: _PlaceHolder, log: bool = False) -> tuple[torch.Tensor, dict[str, float]]:
@@ -600,7 +616,9 @@ class ConStructWrapper(BaseGenerator):
                 "batch_size": int(self.config.get("batch_size", 32)),
                 "lr": float(self.config.get("learning_rate", self.config.get("lr", 2e-4))),
                 "weight_decay": float(self.config.get("weight_decay", 1e-12)),
-                "clip_grad": self.config.get("clip_grad", None),
+                "clip_grad": 1.0
+                if self.config.get("clip_grad", 1.0) is None
+                else self.config.get("clip_grad", 1.0),
                 "seed": int(self.config.get("seed", self.seed)),
                 "num_workers": int(self.config.get("num_workers", 0)),
             },
@@ -1053,13 +1071,51 @@ class ConStructWrapper(BaseGenerator):
             epoch_started_at = time.perf_counter()
             self._log("epoch_start epoch=%d/%d", epoch + 1, n_epochs)
             epoch_losses: list[float] = []
+            skipped_batches = 0
             for batch_idx, batch in enumerate(self._adj_arrays_to_batches(train_arrays, batch_size=batch_size, shuffle=True)):
                 batch_started_at = time.perf_counter()
                 optimizer.zero_grad(set_to_none=True)
-                loss, _ = self.model.loss_on_clean_batch(batch, log=False)
+                try:
+                    loss, _ = self.model.loss_on_clean_batch(batch, log=False)
+                except AssertionError as exc:
+                    skipped_batches += 1
+                    self._log(
+                        "train_batch_skipped epoch=%d/%d batch=%d reason=forward_assertion error=%s duration=%.2fs",
+                        epoch + 1,
+                        n_epochs,
+                        batch_idx + 1,
+                        str(exc),
+                        time.perf_counter() - batch_started_at,
+                    )
+                    continue
+                if not torch.isfinite(loss):
+                    skipped_batches += 1
+                    self._log(
+                        "train_batch_skipped epoch=%d/%d batch=%d reason=nonfinite_loss duration=%.2fs",
+                        epoch + 1,
+                        n_epochs,
+                        batch_idx + 1,
+                        time.perf_counter() - batch_started_at,
+                    )
+                    continue
                 loss.backward()
-                if clip_grad is not None:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), float(clip_grad))
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    float(clip_grad),
+                    error_if_nonfinite=False,
+                )
+                if not torch.isfinite(grad_norm):
+                    optimizer.zero_grad(set_to_none=True)
+                    skipped_batches += 1
+                    self._log(
+                        "train_batch_skipped epoch=%d/%d batch=%d reason=nonfinite_grad grad_norm=%s duration=%.2fs",
+                        epoch + 1,
+                        n_epochs,
+                        batch_idx + 1,
+                        grad_norm.detach().cpu().item() if grad_norm.numel() else grad_norm,
+                        time.perf_counter() - batch_started_at,
+                    )
+                    continue
                 optimizer.step()
                 epoch_losses.append(float(loss.detach().cpu()))
                 if batch_idx % self.log_train_every_n_steps == 0:
@@ -1093,6 +1149,8 @@ class ConStructWrapper(BaseGenerator):
                     last_val_loss,
                     time.perf_counter() - epoch_started_at,
                 )
+            if skipped_batches:
+                self._log("epoch_skipped_batches epoch=%d/%d skipped=%d", epoch + 1, n_epochs, skipped_batches)
 
         self.model.eval()
         self._save_checkpoint()

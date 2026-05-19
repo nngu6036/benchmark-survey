@@ -153,7 +153,7 @@ PYTHONPATH=src python scripts/evaluate_descriptor_metrics.py \
   --skip-orbit
 ```
 
-For all datasets, this reports the shared descriptor schema: degree MMD, clustering MMD, spectral MMD, structural-summary MMD, optional orbit MMD, and `attribute_mmd` when attributes are present. Molecular datasets such as QM9 additionally report validity, uniqueness, novelty, atom-type MMD, and bond-type MMD using the benchmark graph-attribute schema.
+For all datasets, this reports the shared descriptor schema: degree MMD, clustering MMD, spectral MMD, structural-summary MMD, and `attribute_mmd` when attributes are present. Orbit MMD is optional for synthetic datasets and is skipped for molecular datasets. Molecular datasets such as QM9 additionally report validity, uniqueness, novelty, atom-type MMD, and bond-type MMD using the benchmark graph-attribute schema.
 
 Classifier/PGS-JS metric:
 

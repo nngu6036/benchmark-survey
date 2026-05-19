@@ -37,6 +37,7 @@ from empirical_comparison.utils.logging import get_logger
 logger = get_logger(__name__)
 
 METRIC_FILENAME = "descriptor_metrics.json"
+MOLECULAR_DATASETS = {"qm9", "zinc"}
 
 
 def _load_reference_graphs(dataset: str, dataset_root: str, reference_split: str) -> list[nx.Graph]:
@@ -266,6 +267,8 @@ def _mmd_with_optional_bootstrap(ref_desc, gen_desc, *, metric_kind: str, sigma:
 
 def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
     start = time.perf_counter()
+    dataset_key = str(args.dataset).lower()
+    is_molecular_dataset = dataset_key in MOLECULAR_DATASETS
     ref_graphs = _subsample(_load_reference_graphs(args.dataset, args.dataset_root, args.reference_split), args.max_graphs, args.seed)
     gen_graphs = _subsample(_load_generated_graphs(args.dataset, args.model), args.max_graphs, seed + 1)
     train_graphs = _load_train_graphs(args.dataset, args.dataset_root)
@@ -296,7 +299,7 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
         "spectral_mmd": (lambda g: spectral_histogram(g, bins=args.spectral_bins), "emd"),
         "structural_summary_mmd": (structural_summary, "rbf"),
     }
-    if not args.skip_orbit:
+    if not args.skip_orbit and not is_molecular_dataset:
         descriptor_specs["orbit_mmd"] = (
             lambda g: orbit_count_vector(g, orca_exec=args.orca_exec, normalize=True, log_transform=args.orbit_log_transform),
             "emd",
@@ -373,7 +376,7 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
         debug["bond_type_mmd"] = metric_debug
 
     quality = quality_metrics(gen_graphs, reference_graphs=train_graphs, dataset=args.dataset)
-    if str(args.dataset).lower() == "qm9":
+    if dataset_key == "qm9":
         quality.update(_qm9_quality_metrics(gen_graphs, train_graphs, attr_schema, attr_stats))
     results.update(quality)
     elapsed = time.perf_counter() - start
@@ -397,13 +400,15 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
             "max_degree": args.max_degree,
             "orca_exec": args.orca_exec,
             "skip_orbit": args.skip_orbit,
+            "skip_orbit_effective": args.skip_orbit or is_molecular_dataset,
+            "molecular_orbit_mmd_skipped": is_molecular_dataset,
             "orbit_log_transform": args.orbit_log_transform,
             "attribute_mmd": not args.no_attribute_mmd,
-            "qm9_molecular_validity": str(args.dataset).lower() == "qm9",
+            "qm9_molecular_validity": dataset_key == "qm9",
             "attribute_schema": attr_schema,
         },
         "notes": {
-            "orbit_mmd": "ORCA-based 4-node orbit-count MMD when ORCA is configured; otherwise skipped.",
+            "orbit_mmd": "ORCA-based 4-node orbit-count MMD when ORCA is configured; skipped for molecular datasets.",
             "structural_summary_mmd": "Lightweight structural-summary fallback, not a graphlet/orbit metric.",
             "attribute_mmd": "RBF MMD over node/edge attribute histograms and continuous attribute moments when attributes are present.",
             "atom_type_mmd": "RBF MMD over per-graph atom-type histograms when node labels are present.",

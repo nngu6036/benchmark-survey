@@ -71,6 +71,43 @@ def _deep_update(dst: dict[str, Any], src: dict[str, Any] | None) -> dict[str, A
     return dst
 
 
+def _safe_symmetric_eigh(matrix: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run eigh with a CPU/double fallback for rare ill-conditioned batches."""
+    matrix = torch.nan_to_num(matrix)
+    matrix = (matrix + matrix.transpose(-1, -2)) / 2
+    try:
+        return torch.linalg.eigh(matrix)
+    except RuntimeError as exc:
+        if "linalg.eigh" not in str(exc):
+            raise
+
+    device = matrix.device
+    dtype = matrix.dtype
+    n = matrix.shape[-1]
+    eye = torch.eye(n, dtype=torch.float64, device="cpu")
+    eigvals: list[torch.Tensor] = []
+    eigvectors: list[torch.Tensor] = []
+
+    for item in matrix.detach().to(device="cpu", dtype=torch.float64):
+        item = (item + item.transpose(-1, -2)) / 2
+        last_error: RuntimeError | None = None
+        for attempt in range(6):
+            shift = 0.0 if attempt == 0 else 1.0e-8 * (10 ** (attempt - 1))
+            try:
+                vals, vecs = torch.linalg.eigh(item + shift * eye)
+                if shift:
+                    vals = vals - shift
+                eigvals.append(vals.to(device=device, dtype=dtype))
+                eigvectors.append(vecs.to(device=device, dtype=dtype))
+                break
+            except RuntimeError as err:
+                last_error = err
+        else:
+            raise RuntimeError("torch.linalg.eigh failed after CPU/double fallback with jitter") from last_error
+
+    return torch.stack(eigvals, dim=0), torch.stack(eigvectors, dim=0)
+
+
 class _PlaceHolder:
     """Minimal ConStruct-compatible dense graph container.
 
@@ -690,6 +727,42 @@ class ConStructWrapper(BaseGenerator):
         ExtraFeatures.update_input_dims = fixed_update_input_dims
         ExtraFeatures._empirical_bool_patch = True
 
+    def _patch_extra_features_eigh_fallback(self, extra_mod: Any) -> None:
+        EigenFeatures = extra_mod.EigenFeatures
+        if getattr(EigenFeatures, "_empirical_eigh_patch", False):
+            return
+
+        def robust_compute_features(self, noisy_data):
+            E_t = noisy_data.E
+            mask = noisy_data.node_mask
+            A = E_t[..., 1:].sum(dim=-1).float() * mask.unsqueeze(1) * mask.unsqueeze(2)
+            L = self.compute_laplacian(A, normalize=False)
+            mask_diag = 2 * L.shape[-1] * torch.eye(A.shape[-1], device=A.device).type_as(L).unsqueeze(0)
+            mask_diag = mask_diag * (~mask.unsqueeze(1)) * (~mask.unsqueeze(2))
+            L = L * mask.unsqueeze(1) * mask.unsqueeze(2) + mask_diag
+
+            eigvals, eigvectors = _safe_symmetric_eigh(L)
+            eigvals = eigvals.type_as(A) / torch.sum(mask, dim=1, keepdim=True)
+            eigvals = torch.clamp(eigvals, min=0)
+            eigvectors = eigvectors * mask.unsqueeze(2) * mask.unsqueeze(1)
+
+            n_connected_comp, batch_eigenvalues = self.eigenvalues_features(
+                eigenvalues=eigvals,
+                num_eigenvalues=self.num_eigenvalues,
+            )
+            evector_feat = self.eigenvector_features(
+                vectors=eigvectors,
+                node_mask=noisy_data.node_mask,
+                n_connected=n_connected_comp,
+                num_eigenvectors=self.num_eigenvectors,
+            )
+
+            evalue_feat = torch.hstack((n_connected_comp, batch_eigenvalues))
+            return evalue_feat, evector_feat
+
+        EigenFeatures.compute_features = robust_compute_features
+        EigenFeatures._empirical_eigh_patch = True
+
     def _import_modules(self) -> None:
         if self.repo_loaded:
             return
@@ -703,6 +776,7 @@ class ConStructWrapper(BaseGenerator):
         noise_mod = importlib.import_module("diffusion.noise_model")
         extra_mod = importlib.import_module("ConStruct.diffusion.extra_features")
         self._patch_extra_features_bool_bug(extra_mod)
+        self._patch_extra_features_eigh_fallback(extra_mod)
 
         self.mods["GraphTransformer"] = transformer_mod.GraphTransformer
         self.mods["noise_model"] = noise_mod

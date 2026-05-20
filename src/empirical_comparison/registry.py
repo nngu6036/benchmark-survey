@@ -33,12 +33,13 @@ class LazyRegistry(Mapping[str, type]):
             spec = self._specs[key]
             try:
                 module = importlib.import_module(spec.module)
-                cls = getattr(module, spec.class_name)
             except ModuleNotFoundError as exc:
                 hint = f" Hint: {spec.optional_dependency_hint}" if spec.optional_dependency_hint else ""
                 raise ModuleNotFoundError(
                     f"Could not import {spec.kind} '{key}' from {spec.module}.{spec.class_name}." + hint
                 ) from exc
+            try:
+                cls = getattr(module, spec.class_name)
             except AttributeError as exc:
                 raise AttributeError(
                     f"Registry entry '{key}' points to missing class {spec.class_name!r} in {spec.module!r}."

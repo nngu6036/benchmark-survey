@@ -23,7 +23,9 @@ except Exception:  # pragma: no cover - dependency is validated lazily.
 try:  # Optional until the DiGress wrapper is actually trained/sampled.
     from pytorch_lightning import Trainer
     from pytorch_lightning.callbacks import Callback
+    _LIGHTNING_IMPORT_ERROR: Exception | None = None
 except Exception:  # pragma: no cover - dependency is validated lazily.
+    _LIGHTNING_IMPORT_ERROR = sys.exc_info()[1]
     Trainer = None  # type: ignore[assignment]
     class Callback:  # type: ignore[no-redef]
         pass
@@ -40,6 +42,20 @@ from empirical_comparison.utils.progress import update_progress
 
 
 LOGGER = get_logger(__name__)
+
+
+def _cuda_device_is_usable(device: str = "cuda") -> tuple[bool, str | None]:
+    """Return whether PyTorch can actually allocate on the requested CUDA device."""
+    if not torch.cuda.is_available():
+        return False, "torch.cuda.is_available() is false"
+    try:
+        target = torch.device(device)
+        if target.type != "cuda":
+            return True, None
+        torch.empty(1, device=target)
+        return True, None
+    except Exception as exc:  # pragma: no cover - depends on local CUDA driver/runtime.
+        return False, f"{type(exc).__name__}: {exc}"
 
 
 class _NoOpSamplingMetrics(torch.nn.Module):
@@ -257,7 +273,7 @@ class DiGressWrapper(BaseGenerator):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self.device = config.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = self._resolve_device(config.get("device"))
         self.dataset_name = str(config.get("dataset_name") or config.get("dataset") or "sbm").lower()
         if self.dataset_name not in self.SUPPORTED_DATASETS:
             raise ValueError(
@@ -302,6 +318,31 @@ class DiGressWrapper(BaseGenerator):
     # ------------------------------------------------------------------
     # Repository loading and DiGress config construction
     # ------------------------------------------------------------------
+
+    def _resolve_device(self, requested: Any) -> str:
+        if requested is not None:
+            device = torch.device(str(requested))
+            if device.type == "cuda":
+                usable, reason = _cuda_device_is_usable(str(device))
+                if not usable:
+                    LOGGER.warning(
+                        "DiGressWrapper requested CUDA device %s but CUDA is not usable (%s); falling back to CPU.",
+                        requested,
+                        reason,
+                    )
+                    return "cpu"
+            return str(device)
+
+        usable, reason = _cuda_device_is_usable("cuda")
+        if usable:
+            return "cuda"
+        if torch.cuda.is_available():
+            LOGGER.warning("DiGressWrapper detected CUDA but could not use it (%s); falling back to CPU.", reason)
+        return "cpu"
+
+    def _uses_cuda(self) -> bool:
+        return torch.device(str(self.device)).type == "cuda"
+
     def _normalize_repo_root(self, repo_root: Path) -> Path:
         repo_root = repo_root.resolve()
         if repo_root.suffix == ".zip":
@@ -532,7 +573,7 @@ class DiGressWrapper(BaseGenerator):
 
         cfg.general.name = str(self.config.get("experiment_name", f"digress_{self.dataset_name}"))
         cfg.general.wandb = str(self.config.get("wandb", "disabled"))
-        cfg.general.gpus = int(self.config.get("gpus", 0 if self.device == "cpu" else 1))
+        cfg.general.gpus = 0 if not self._uses_cuda() else int(self.config.get("gpus", 1))
         cfg.general.resume = None
         cfg.general.test_only = None
         cfg.general.evaluate_all_checkpoints = False
@@ -906,7 +947,13 @@ class DiGressWrapper(BaseGenerator):
 
     def _make_trainer(self) -> Trainer:
         assert self.cfg is not None
-        use_gpu = self.cfg.general.gpus > 0 and torch.cuda.is_available()
+        if Trainer is None:
+            raise ImportError(
+                "DiGress requires a pytorch_lightning version compatible with the installed torch. "
+                "The current Lightning import failed; for the reported error, install a newer torch "
+                "that provides torch.UntypedStorage or use an older compatible pytorch_lightning/lightning_fabric."
+            ) from _LIGHTNING_IMPORT_ERROR
+        use_gpu = self.cfg.general.gpus > 0 and self._uses_cuda()
         callbacks: list[Any] = []
         if self.finite_guard:
             callbacks.append(_FiniteGuardCallback(check_every_n_steps=self.finite_guard_check_every_n_steps))
@@ -1078,7 +1125,7 @@ class DiGressWrapper(BaseGenerator):
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if torch.cuda.is_available():
+        if self._uses_cuda():
             torch.cuda.manual_seed_all(seed)
 
         if self.is_molecular:
@@ -1111,7 +1158,7 @@ class DiGressWrapper(BaseGenerator):
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if torch.cuda.is_available():
+        if self._uses_cuda():
             torch.cuda.manual_seed_all(seed)
 
         self.model.eval()

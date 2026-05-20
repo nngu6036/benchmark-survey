@@ -16,6 +16,25 @@ from typing import Any
 import networkx as nx
 import numpy as np
 import torch
+
+
+def _patch_torchvision_onnx_compat() -> None:
+    """Restore a private ONNX helper expected by some torchvision builds."""
+    try:
+        from torch.onnx import symbolic_opset9
+    except Exception:
+        return
+    if hasattr(symbolic_opset9, "_cast_Long"):
+        return
+
+    def _cast_Long(g, input, non_blocking=False):  # noqa: N802 - mirrors PyTorch's private helper name.
+        del non_blocking
+        return g.op("Cast", input, to_i=7)
+
+    symbolic_opset9._cast_Long = _cast_Long
+
+
+_patch_torchvision_onnx_compat()
 try:  # Optional until the DiGress wrapper is actually trained/sampled.
     from omegaconf import OmegaConf
 except Exception:  # pragma: no cover - dependency is validated lazily.
@@ -384,6 +403,7 @@ class DiGressWrapper(BaseGenerator):
         self._log("importing upstream DiGress modules dataset=%s", self.dataset_name)
         self._ensure_repo_layout()
         self._ensure_repo_importable()
+        _patch_torchvision_onnx_compat()
         try:
             self._imports["datasets_spectre"] = importlib.import_module("src.datasets.spectre_dataset")
             self._imports["metrics_abstract"] = importlib.import_module("src.metrics.abstract_metrics")

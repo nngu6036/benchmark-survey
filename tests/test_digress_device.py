@@ -1,6 +1,12 @@
+from types import SimpleNamespace
+
 import torch
 
-from empirical_comparison.models.wrappers.digress import DiGressWrapper, _cuda_device_is_usable
+from empirical_comparison.models.wrappers.digress import (
+    DiGressWrapper,
+    _cuda_device_is_usable,
+    _patch_torchvision_onnx_compat,
+)
 
 
 def test_cuda_probe_rejects_unusable_cuda(monkeypatch):
@@ -33,3 +39,16 @@ def test_digress_device_falls_back_to_cpu_when_cuda_probe_fails(monkeypatch):
 
     assert wrapper._resolve_device(None) == "cpu"
     assert wrapper._resolve_device("cuda") == "cpu"
+
+
+def test_torchvision_onnx_cast_long_compat_patch(monkeypatch):
+    from torch.onnx import symbolic_opset9
+
+    monkeypatch.delattr(symbolic_opset9, "_cast_Long", raising=False)
+
+    _patch_torchvision_onnx_compat()
+
+    graph = SimpleNamespace(op=lambda *args, **kwargs: (args, kwargs))
+    args, kwargs = symbolic_opset9._cast_Long(graph, "value")
+    assert args == ("Cast", "value")
+    assert kwargs == {"to_i": 7}

@@ -19,7 +19,7 @@ import torch
 import yaml
 
 from empirical_comparison.utils.progress import update_progress
-from empirical_comparison.utils.numerics import assert_model_tensors_finite, assert_torch_grads_finite
+from empirical_comparison.utils.numerics import assert_finite_graphs, assert_model_tensors_finite, assert_torch_grads_finite
 from torch.utils.data import DataLoader, TensorDataset
 
 
@@ -236,6 +236,7 @@ class GruMWrapper:
         self._train_node_counts: Optional[List[int]] = None
         self._train_graphs: Optional[List[nx.Graph]] = None
         self._ema_copied_for_sampling = False
+        self._last_sampling_diagnostics: Dict[str, Any] = {}
 
     @property
     def name(self) -> str:
@@ -309,6 +310,7 @@ class GruMWrapper:
         self._loaded_params = params
         self._loaded_metadata = metadata
         self._ema_copied_for_sampling = False
+        self._last_sampling_diagnostics = {}
 
         node_counts = metadata.get("node_counts") or metadata.get("train_node_counts") or []
         self._train_node_counts = [int(n) for n in node_counts if int(n) > 0]
@@ -390,6 +392,9 @@ class GruMWrapper:
         batch_log_every = int(self._cfg("batch_log_every", 50))
         grad_clip = float(config.train.grad_norm) if float(config.train.grad_norm) > 0 else None
 
+        successful_updates = 0
+        skipped_updates = 0
+
         model.train()
         for epoch in range(num_epochs):
             losses_x: List[float] = []
@@ -410,6 +415,7 @@ class GruMWrapper:
                         flush=True,
                     )
                     optimizer.zero_grad(set_to_none=True)
+                    skipped_updates += 1
                     continue
                 loss.backward()
                 try:
@@ -417,15 +423,18 @@ class GruMWrapper:
                 except FloatingPointError as exc:
                     print(f"[GruM:{self.dataset_name}] skipping non-finite gradients: {exc}", flush=True)
                     optimizer.zero_grad(set_to_none=True)
+                    skipped_updates += 1
                     continue
                 if grad_clip is not None:
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip, error_if_nonfinite=False)
                     if torch.is_tensor(grad_norm) and not torch.isfinite(grad_norm).all():
                         print(f"[GruM:{self.dataset_name}] skipping non-finite clipped gradient norm", flush=True)
                         optimizer.zero_grad(set_to_none=True)
+                        skipped_updates += 1
                         continue
                 optimizer.step()
                 assert_model_tensors_finite(model, context=f"GruM parameters after epoch {epoch + 1}")
+                successful_updates += 1
                 ema.update(model.parameters())
                 losses_total.append(float(loss.detach().cpu()))
                 losses_x.append(float(loss_x.detach().cpu()) if torch.isfinite(loss_x.detach()).all() else math.nan)
@@ -454,7 +463,12 @@ class GruMWrapper:
                     flush=True,
                 )
 
+        if successful_updates == 0:
+            raise FloatingPointError("GruM training completed without a single finite optimizer update; refusing to save checkpoint.")
+
         metadata = self._metadata(train_split, val_split, test_split, config)
+        metadata["successful_updates"] = int(successful_updates)
+        metadata["skipped_updates"] = int(skipped_updates)
         metadata["history_tail"] = history[-20:]
         metadata["benchmark_wrapper_version"] = 3
         ckpt = {
@@ -480,6 +494,7 @@ class GruMWrapper:
         self._train_node_counts = metadata["node_counts"]
         self._train_graphs = train_split
         self._ema_copied_for_sampling = False
+        self._last_sampling_diagnostics = {}
 
     def sample(self, num_graphs: int, seed: int = 0, progress_callback=None) -> List[nx.Graph]:
         if self._model is None or self._loaded_config is None:
@@ -501,6 +516,7 @@ class GruMWrapper:
         feature_dim = int(config.data.max_feat_num)
         batch_size = int(config.sample.batch_size)
         graphs: List[nx.Graph] = []
+        self._last_sampling_diagnostics = {"sample_batches": 0, "nonfinite_steps": 0, "nonfinite_values": 0}
 
         while len(graphs) < int(num_graphs):
             current_bs = min(batch_size, int(num_graphs) - len(graphs))
@@ -509,7 +525,9 @@ class GruMWrapper:
             before = len(graphs)
             graphs.extend(self._adjs_to_graphs(adj, masks))
             update_progress(progress_callback, min(len(graphs), num_graphs) - min(before, num_graphs))
-        return graphs[:num_graphs]
+        graphs = graphs[:num_graphs]
+        assert_finite_graphs(graphs, context=f"GruM sample output dataset={self.dataset_name}")
+        return graphs
 
     # ------------------------------------------------------------------
     # Upstream import and config helpers
@@ -961,6 +979,9 @@ class GruMWrapper:
         x = self._mask_x(x, masks)
         adj = self._mask_adj(adj, masks)
         steps = int(mix.adj.N)
+        diag = self._last_sampling_diagnostics
+        diag["sample_batches"] = int(diag.get("sample_batches", 0)) + 1
+        diag["steps_per_batch"] = steps
         T = float(mix.adj.bridge(0).T)
         eps = float(config.sample.eps)
         timesteps = torch.linspace(0.0, T - eps, steps, device=device)
@@ -971,6 +992,12 @@ class GruMWrapper:
                 y = vec_t.unsqueeze(-1)
                 x, x_mean, adj, adj_mean = corrector_obj.update_fn(x, adj, y, masks, vec_t)
                 x, x_mean, adj, adj_mean = predictor_obj.update_fn(x, adj, y, masks, vec_t)
+                _bad_total = 0
+                for _name, _tensor in (("x", x), ("adj", adj), ("x_mean", x_mean), ("adj_mean", adj_mean)):
+                    _bad_total += int((~torch.isfinite(_tensor)).sum().item())
+                if _bad_total:
+                    diag["nonfinite_steps"] = int(diag.get("nonfinite_steps", 0)) + 1
+                    diag["nonfinite_values"] = int(diag.get("nonfinite_values", 0)) + _bad_total
                 x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
                 adj = torch.nan_to_num(adj, nan=0.0, posinf=1.0, neginf=0.0)
                 x_mean = torch.nan_to_num(x_mean, nan=0.0, posinf=1.0, neginf=-1.0)

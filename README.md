@@ -67,14 +67,6 @@ metadata.json
 resolved_dataset_config.yaml
 ```
 
-Print basic statistics for a prepared dataset with:
-
-```bash
-PYTHONPATH=src python scripts/print_dataset_statistics.py --dataset qm9
-```
-
-This reports split-level graph counts, node/edge ranges, density, average degree, connectedness, self-loop rate, and attribute summary fields. Add `--json` for machine-readable output.
-
 ## 3. Train models on featureless or attributed graphs
 
 Single model and dataset:
@@ -83,18 +75,6 @@ Single model and dataset:
 PYTHONPATH=src python scripts/train_model.py --dataset sbm --model dummy
 PYTHONPATH=src python scripts/generate_samples.py --dataset sbm --model dummy --num-samples 1024 --force
 ```
-
-Training with CPU
-```bash
-python3 scripts/train_model.py \
-  --dataset planar \
-  --model digress \
-  --model-config configs/models/digress_cpu.yaml \
-  --seed 42 \
-  --run-id 0 \
-  --use-run-paths
-```
-
 
 Run-aware synthetic repetition example:
 

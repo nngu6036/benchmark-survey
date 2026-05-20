@@ -1,7 +1,7 @@
 name: planar
 seed: 42
 root: outputs/datasets
-num_graphs: 3072
+num_graphs: 10240
 num_nodes: 64
 remove_self_loops: true
 preprocessing:
@@ -13,6 +13,6 @@ preprocessing:
 hard_constraints:
   planar: true
 split:
-  train: 0.3333333333
-  val: 0.3333333333
-  test: 0.3333333333
+  train: 0.8
+  val: 0.1
+  test: 0.1

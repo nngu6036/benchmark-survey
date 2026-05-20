@@ -34,7 +34,7 @@ from empirical_comparison.metrics.descriptor.descriptors import (
 from empirical_comparison.metrics.descriptor.mmd import mmd_gaussian_emd, mmd_unbiased
 from empirical_comparison.metrics.molecular.rdkit_validity import molecular_quality_metrics
 from empirical_comparison.registry import available_datasets, available_models
-from empirical_comparison.utils.io import load_json, load_pickle, save_json
+from empirical_comparison.utils.io import load_json, load_pickle, load_yaml, save_json
 from empirical_comparison.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -164,6 +164,51 @@ def _raw_attribute_values(dataset: str, dataset_root: str) -> tuple[list[str], l
         return [], []
 
 
+def _explicit_rdkit_node_mapping(dataset: str) -> tuple[list[str], str | None]:
+    """Return optional user-supplied node-class -> atomic-number/symbol mapping.
+
+    PyG ZINC atom_type ids are categorical.  Users can provide
+    configs/datasets/zinc.yaml:rdkit_atomic_number_mapping as either a list
+    indexed by node_label or a dict whose keys are node_label ids. Numeric
+    values are encoded as "atomic_number=<n>" so rdkit_validity.py knows they
+    are an explicit mapping rather than bare category ids.
+    """
+    cfg_path = ROOT / "configs" / "datasets" / f"{dataset}.yaml"
+    if not cfg_path.exists():
+        return [], None
+    try:
+        cfg = load_yaml(cfg_path) or {}
+    except Exception:
+        return [], None
+    mapping = cfg.get("rdkit_atomic_number_mapping")
+    if mapping is None:
+        return [], None
+
+    def encode(value: Any) -> str:
+        if isinstance(value, bool):
+            return str(value)
+        if isinstance(value, (int, float)) and float(value).is_integer():
+            return f"atomic_number={int(value)}"
+        return str(value)
+
+    if isinstance(mapping, dict):
+        parsed: dict[int, str] = {}
+        for key, value in mapping.items():
+            try:
+                parsed[int(key)] = encode(value)
+            except Exception:
+                continue
+        if not parsed:
+            return [], None
+        values = [""] * (max(parsed) + 1)
+        for key, value in parsed.items():
+            values[key] = value
+        return values, "configs/datasets/%s.yaml:rdkit_atomic_number_mapping" % dataset
+    if isinstance(mapping, list):
+        return [encode(v) for v in mapping], "configs/datasets/%s.yaml:rdkit_atomic_number_mapping" % dataset
+    return [], None
+
+
 def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
     start = time.perf_counter()
     max_ref_graphs = args.max_reference_graphs if args.max_reference_graphs is not None else args.max_graphs
@@ -186,6 +231,7 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
     ref_graphs, _ = canonicalize_graph_attributes(ref_graphs, attr_schema, attr_stats)
     gen_graphs, _ = canonicalize_graph_attributes(gen_graphs, attr_schema, attr_stats)
     raw_node_values, raw_edge_values = _raw_attribute_values(args.dataset, args.dataset_root)
+    explicit_raw_node_values, rdkit_mapping_source = _explicit_rdkit_node_mapping(args.dataset)
 
     logger.info(
         "Evaluating molecular descriptor metrics: dataset=%s model=%s run_id=%s ref_split=%s ref=%d gen=%d",
@@ -283,7 +329,7 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
         train_graphs,
         node_label_attr=attr_schema["node_label_attr"],
         edge_label_attr=attr_schema["edge_label_attr"],
-        raw_node_label_values=raw_node_values or attr_stats.node_label_values,
+        raw_node_label_values=explicit_raw_node_values or raw_node_values or attr_stats.node_label_values,
         raw_edge_label_values=raw_edge_values or attr_stats.edge_label_values,
         dataset=args.dataset,
     )
@@ -318,7 +364,8 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
             "attribute_mmd": not args.no_attribute_mmd,
             "rdkit_validity": True,
             "attribute_schema": attr_schema,
-            "raw_node_label_values_for_rdkit": raw_node_values,
+            "raw_node_label_values_for_rdkit": explicit_raw_node_values or raw_node_values,
+            "rdkit_atomic_number_mapping_source": rdkit_mapping_source,
             "raw_edge_label_values_for_rdkit": raw_edge_values,
         },
         "notes": {

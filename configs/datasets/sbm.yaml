@@ -1,7 +1,7 @@
 name: sbm
 seed: 42
 root: outputs/datasets
-num_graphs: 3072
+num_graphs: 10240
 num_nodes: 64
 num_blocks: 4
 p_in: 0.25
@@ -14,6 +14,6 @@ preprocessing:
     min_nodes: 1
     max_nodes: 64
 split:
-  train: 0.3333333333
-  val: 0.3333333333
-  test: 0.3333333333
+  train: 0.8
+  val: 0.1
+  test: 0.1

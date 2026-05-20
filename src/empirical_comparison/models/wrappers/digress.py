@@ -16,9 +16,17 @@ from typing import Any
 import networkx as nx
 import numpy as np
 import torch
-from omegaconf import OmegaConf
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import Callback
+try:  # Optional until the DiGress wrapper is actually trained/sampled.
+    from omegaconf import OmegaConf
+except Exception:  # pragma: no cover - dependency is validated lazily.
+    OmegaConf = None  # type: ignore[assignment]
+try:  # Optional until the DiGress wrapper is actually trained/sampled.
+    from pytorch_lightning import Trainer
+    from pytorch_lightning.callbacks import Callback
+except Exception:  # pragma: no cover - dependency is validated lazily.
+    Trainer = None  # type: ignore[assignment]
+    class Callback:  # type: ignore[no-redef]
+        pass
 
 from empirical_comparison.models.base import BaseGenerator
 from empirical_comparison.utils.numerics import (
@@ -505,6 +513,8 @@ class DiGressWrapper(BaseGenerator):
         spectre.SpectreGraphDataset._empirical_comparison_process_patch = True
 
     def _default_cfg(self) -> Any:
+        if OmegaConf is None:
+            raise ImportError("DiGress requires omegaconf. Install the DiGress dependencies or use a non-DiGress model.")
         cfg_dir = self.repo_root / "configs"
         general = OmegaConf.load(cfg_dir / "general" / "general_default.yaml")
         model = OmegaConf.load(cfg_dir / "model" / "discrete.yaml")
@@ -665,7 +675,7 @@ class DiGressWrapper(BaseGenerator):
                 atom_class -= 1
             if atom_class < 0 or atom_class >= n_atom_classes:
                 raise ValueError(
-                    f"Invalid QM9 atom class {atom_class} after remove_h={remove_h}: "
+                    f"Invalid molecular atom class {atom_class} after remove_h={remove_h}: "
                     f"split={split_name}, index={idx}, node={node}. Expected range [0, {n_atom_classes - 1}]."
                 )
             atom_indices.append(atom_class)
@@ -1142,7 +1152,7 @@ class DiGressWrapper(BaseGenerator):
                         len(out_graphs),
                         time.perf_counter() - batch_started_at,
                     )
-                batch_id += cur_bs
+                batch_id += 1
 
         result = out_graphs[:num_graphs]
         assert_finite_graphs(result, context="DiGress sample output")

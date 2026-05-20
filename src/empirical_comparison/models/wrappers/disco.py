@@ -20,7 +20,7 @@ import torch.nn.functional as F
 
 from empirical_comparison.models.base import BaseGenerator
 from empirical_comparison.utils.progress import update_progress
-from empirical_comparison.utils.numerics import assert_model_tensors_finite, assert_torch_grads_finite
+from empirical_comparison.utils.numerics import assert_finite_graphs, assert_model_tensors_finite, assert_torch_grads_finite
 
 
 @dataclass
@@ -102,6 +102,8 @@ class DisCoWrapper(BaseGenerator):
         self.n_node_distribution: torch.distributions.Categorical | None = None
         self.meta: _DisCoDatasetMeta | None = None
         self.best_metric: float | None = None
+        self._current_epoch = 0
+        self._last_epoch_successful_updates = 0
 
     @property
     def name(self) -> str:
@@ -524,7 +526,7 @@ class DisCoWrapper(BaseGenerator):
         batch_size = max(1, int(self.config.get("batch_size", 32)))
         indices = list(range(len(graphs)))
         if shuffle:
-            rng = random.Random(self.seed)
+            rng = random.Random(self.seed + int(getattr(self, "_current_epoch", 0)))
             rng.shuffle(indices)
         for start in range(0, len(indices), batch_size):
             yield [graphs[i] for i in indices[start : start + batch_size]]
@@ -560,6 +562,8 @@ class DisCoWrapper(BaseGenerator):
         if not bool(self.config.get("save_provenance_dataset", True)):
             return
         self.data_root.mkdir(parents=True, exist_ok=True)
+        self._current_epoch = 0
+        self._last_epoch_successful_updates = 0
 
         def to_adj_list(graphs: list[nx.Graph] | None) -> list[torch.Tensor]:
             if not graphs:
@@ -588,6 +592,9 @@ class DisCoWrapper(BaseGenerator):
     # Model construction
     # ------------------------------------------------------------------
     def _aux_feature_flags(self) -> dict[str, bool]:
+        disable_molecular = bool(self.config.get("disable_structural_features_for_molecular", False)) and self.dataset in {"qm9", "zinc"}
+        if disable_molecular:
+            return {"cycle_fea": False, "eigen_fea": False, "rwpe_fea": False, "global_fea": False}
         return {
             "cycle_fea": bool(self.config.get("cycle_fea", True)),
             "eigen_fea": bool(self.config.get("eigen_fea", True)),
@@ -782,6 +789,7 @@ class DisCoWrapper(BaseGenerator):
         edge_loss_weight = float(self.config.get("edge_loss_weight", 5.0))
         include_node_feature = bool(getattr(self.diffuser, "diffuse_node", False))
 
+        successful_updates = 0
         total_loss = 0.0
         total_acc = 0.0
         batches = 0
@@ -840,6 +848,7 @@ class DisCoWrapper(BaseGenerator):
                             continue
                     self.optimizer.step()
                     assert_model_tensors_finite(self.model, context=f"DisCo {self.dataset} parameters")
+                    successful_updates += 1
 
                 with torch.no_grad():
                     E_mask = node_mask.unsqueeze(-1) * node_mask.unsqueeze(-2)
@@ -851,6 +860,8 @@ class DisCoWrapper(BaseGenerator):
                 total_acc += edge_acc
                 batches += 1
 
+        if train:
+            self._last_epoch_successful_updates = int(successful_updates)
         if batches == 0:
             return float("nan"), float("nan")
         return total_loss / batches, total_acc / batches
@@ -894,6 +905,7 @@ class DisCoWrapper(BaseGenerator):
         best_epoch = 0
 
         for epoch in range(1, num_epochs + 1):
+            self._current_epoch = epoch
             train_loss, train_edge_acc = self._run_epoch(train_clean, train=True)
             val_loss = None
             val_edge_acc = None
@@ -903,7 +915,7 @@ class DisCoWrapper(BaseGenerator):
             else:
                 score = train_loss
 
-            if score < best_score or epoch == 1:
+            if math.isfinite(score) and (score < best_score or best_epoch == 0):
                 best_score = score
                 best_epoch = epoch
                 self._save_checkpoint(epoch, train_loss, val_loss)
@@ -913,6 +925,9 @@ class DisCoWrapper(BaseGenerator):
                 if val_loss is not None:
                     msg += f" val_loss={val_loss:.4f} val_edge_acc={val_edge_acc:.4f}"
                 print(msg)
+
+        if best_epoch == 0:
+            raise FloatingPointError("DisCo training did not produce a finite checkpoint; refusing to keep checkpoint metadata.")
 
         self.best_metric = best_score
         if self.checkpoint_path.exists():
@@ -991,4 +1006,6 @@ class DisCoWrapper(BaseGenerator):
             update_progress(progress_callback, min(len(graphs), num_graphs) - min(before, num_graphs))
             remaining -= batch
 
+        graphs = graphs[:num_graphs]
+        assert_finite_graphs(graphs, context=f"DisCo sample output dataset={self.dataset}")
         return graphs

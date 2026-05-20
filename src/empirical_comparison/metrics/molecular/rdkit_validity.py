@@ -5,6 +5,7 @@ from typing import Any, Sequence
 
 import networkx as nx
 import numpy as np
+import re
 
 try:  # pragma: no cover - availability depends on environment.
     from rdkit import Chem
@@ -24,6 +25,21 @@ class MolecularEvaluationResult:
     validity_backend: str
     rdkit_available: bool
     construction_failures: int
+
+
+def _is_integer_like_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, float):
+        return float(value).is_integer()
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return False
+        return stripped.lstrip("+-").isdigit()
+    return False
 
 
 def _as_int(value: Any) -> int | None:
@@ -73,19 +89,60 @@ def atomic_number_from_graph_label(
     raw_node_label_values: Sequence[str] | None = None,
     dataset: str | None = None,
 ) -> int | None:
+    """Resolve a graph node label into an RDKit atomic number.
+
+    For ZINC, PyG's ``atom_type`` labels are categorical ids.  The benchmark
+    therefore does **not** interpret integer ZINC category ids as atomic
+    numbers unless an explicit ``atomic_number``/``z`` attribute is present or
+    the raw label vocabulary contains non-numeric atom symbols such as ``C`` or
+    ``Cl``.  This avoids false-positive RDKit validity on ZINC.
+    """
     data = graph.nodes[node]
     for key in ("atomic_number", "z", "atomic_num"):
-        atomic_number = _periodic_atomic_number(data.get(key))
-        if atomic_number is not None:
-            return atomic_number
+        atomic_number = _as_int(data.get(key))
+        if atomic_number in _VALID_ATOMIC_NUMBERS:
+            return int(atomic_number)
+
+    dataset_key = str(dataset or "").lower()
     label = data.get(node_label_attr)
+    label_int = _as_int(label)
+    if dataset_key == "qm9" and label_int in _QM9_CLASS_TO_ATOMIC_NUMBER:
+        return _QM9_CLASS_TO_ATOMIC_NUMBER[int(label_int)]
+
     raw = _raw_value_from_canonical(label, raw_node_label_values, offset=0)
+    if dataset_key == "zinc":
+        # PyG ZINC atom_type values are categorical ids, not guaranteed
+        # periodic-table atomic numbers.  Reject bare numeric category values
+        # unless the graph carries explicit atomic_number/z attributes above or
+        # the caller supplies an explicit mapping value such as "atomic_number=6".
+        if raw is None:
+            return None
+        raw_text = str(raw).strip()
+        if not raw_text:
+            return None
+        lowered = raw_text.lower()
+        if lowered.startswith(("atomic_number", "atomic_num", "z=")) or "atomic_number" in lowered or "atomic_num" in lowered:
+            numbers = re.findall(r"[-+]?\d+", raw_text)
+            for number in numbers:
+                atomic_number = _as_int(number)
+                if atomic_number in _VALID_ATOMIC_NUMBERS:
+                    return int(atomic_number)
+        if _is_integer_like_value(raw_text):
+            return None
+        for token in raw_text.replace(",", ":").replace("|", ":").replace("=", ":").split(":"):
+            token = token.strip()
+            if token and not _is_integer_like_value(token):
+                atomic_number = _periodic_atomic_number(token)
+                if atomic_number is not None:
+                    return int(atomic_number)
+        return None
+
     atomic_number = _periodic_atomic_number(raw)
     if atomic_number is not None:
         return atomic_number
-    label_int = _as_int(label)
-    if str(dataset or "").lower() == "qm9" and label_int in _QM9_CLASS_TO_ATOMIC_NUMBER:
-        return _QM9_CLASS_TO_ATOMIC_NUMBER[int(label_int)]
+    atomic_number = _periodic_atomic_number(label)
+    if atomic_number is not None:
+        return atomic_number
     return None
 
 
@@ -342,4 +399,9 @@ def molecular_quality_metrics(
         "validity_backend": gen_eval.validity_backend,
         "rdkit_available": bool(gen_eval.rdkit_available),
         "rdkit_construction_failures": int(gen_eval.construction_failures),
+        "zinc_categorical_label_note": (
+            "PyG ZINC atom_type labels are categorical; integer category ids are not treated as atomic numbers. "
+            "Provide atomic_number/z node attributes or a symbol-valued raw_node_label_values mapping for RDKit validity."
+            if str(dataset or "").lower() == "zinc" else None
+        ),
     }

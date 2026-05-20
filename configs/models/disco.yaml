@@ -57,6 +57,7 @@ cycle_fea: true
 eigen_fea: true
 rwpe_fea: false
 global_fea: true
+disable_structural_features_for_molecular: true
 
 capabilities:
   supports_graph_labels: false

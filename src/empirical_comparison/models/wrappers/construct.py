@@ -20,6 +20,7 @@ import torch.nn.functional as F
 
 from empirical_comparison.models.base import BaseGenerator
 from empirical_comparison.utils.logging import get_logger
+from empirical_comparison.utils.numerics import assert_finite_graphs, assert_model_tensors_finite
 from empirical_comparison.utils.progress import update_progress
 
 
@@ -790,8 +791,8 @@ class ConStructWrapper(BaseGenerator):
 
         import importlib
 
-        transformer_mod = importlib.import_module("models.transformer_model")
-        noise_mod = importlib.import_module("diffusion.noise_model")
+        transformer_mod = importlib.import_module("ConStruct.models.transformer_model")
+        noise_mod = importlib.import_module("ConStruct.diffusion.noise_model")
         extra_mod = importlib.import_module("ConStruct.diffusion.extra_features")
         self._patch_extra_features_bool_bug(extra_mod)
         self._patch_extra_features_eigh_fallback(extra_mod)
@@ -802,6 +803,102 @@ class ConStructWrapper(BaseGenerator):
         self.mods["DummyExtraFeatures"] = extra_mod.DummyExtraFeatures
         self.repo_loaded = True
 
+
+    def _patch_projector_device_bug(self, projector_mod: Any) -> None:
+        """Make upstream reverse projectors CUDA-safe.
+
+        The upstream ConStruct projector writes CPU one-hot tensors into CUDA
+        edge tensors when reverse projection rejects an edge.  This only shows
+        up at sampling time and is especially common for planar reverse
+        projection.  The patch keeps the original algorithm but constructs the
+        zero-edge class on the same device and with the same dtype as z_s.E.
+        """
+        if getattr(projector_mod, "_empirical_device_patch", False):
+            return
+
+        def _zero_edge_like(z_s: Any) -> torch.Tensor:
+            return F.one_hot(
+                torch.zeros((), dtype=torch.long, device=z_s.E.device),
+                num_classes=z_s.E.shape[-1],
+            ).type_as(z_s.E)
+
+        def patched_do_zero_prob_forbidden_edges(pred: Any, z_t: Any, clean_data: Any) -> Any:
+            adj_matrices = (z_t.E > 0).int()
+            zeroed_edge = pred.E.new_tensor([1.0] + [0.0] * (pred.E.shape[-1] - 1))
+            for graph_idx, adj_matrix in enumerate(adj_matrices):
+                num_nodes = z_t.X.shape[1]
+                adj_matrix = adj_matrix[:num_nodes, :num_nodes]
+                forbidden_edges = projector_mod.get_forbidden_edges(adj_matrix)
+                if forbidden_edges.shape[0] > 0:
+                    forbidden_edges = forbidden_edges.to(device=pred.E.device, dtype=torch.long)
+                    pred.E[graph_idx, forbidden_edges[:, 0], forbidden_edges[:, 1]] = zeroed_edge
+                    pred.E[graph_idx, forbidden_edges[:, 1], forbidden_edges[:, 0]] = zeroed_edge
+            return pred
+
+        def patched_project(self: Any, z_s: Any) -> None:
+            z_s_adj = projector_mod.get_adj_matrix(z_s)
+            diff_adj = z_s_adj - self.z_t_adj
+            assert (diff_adj >= 0).all()
+            new_edges = diff_adj.nonzero(as_tuple=False)
+            zeroed_edge = _zero_edge_like(z_s)
+
+            for graph_idx, nx_graph in enumerate(self.nx_graphs_list):
+                old_nx_graph = nx_graph.copy()
+                edges_to_add = (
+                    new_edges[
+                        torch.logical_and(
+                            new_edges[:, 0] == graph_idx,
+                            new_edges[:, 1] < new_edges[:, 2],
+                        )
+                    ][:, 1:]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
+
+                if self.can_block_edges:
+                    not_blocked_edges = []
+                    for edge in edges_to_add:
+                        u, v = int(edge[0]), int(edge[1])
+                        if self.blocked_edges[graph_idx][(u, v)]:
+                            z_s.E[graph_idx, u, v] = zeroed_edge
+                            z_s.E[graph_idx, v, u] = zeroed_edge
+                        else:
+                            not_blocked_edges.append([u, v])
+                    edges_to_add = np.asarray(not_blocked_edges, dtype=np.int64)
+
+                if len(edges_to_add) > 1:
+                    nx_graph.add_edges_from(edges_to_add)
+
+                if not self.valid_graph_fn(nx_graph) or len(edges_to_add) == 1:
+                    nx_graph = old_nx_graph
+                    np.random.shuffle(edges_to_add)
+                    for edge in edges_to_add:
+                        old_nx_graph = nx_graph.copy()
+                        u, v = int(edge[0]), int(edge[1])
+                        nx_graph.add_edge(u, v)
+                        if not self.valid_graph_fn(nx_graph):
+                            nx_graph = old_nx_graph
+                            z_s.E[graph_idx, u, v] = zeroed_edge
+                            z_s.E[graph_idx, v, u] = zeroed_edge
+                            if self.can_block_edges:
+                                self.blocked_edges[graph_idx][(u, v)] = True
+                    self.nx_graphs_list[graph_idx] = nx_graph
+
+                assert (
+                    nx.to_numpy_array(nx_graph) == nx.to_numpy_array(self.nx_graphs_list[graph_idx])
+                ).all()
+                num_nodes = self.nx_graphs_list[graph_idx].number_of_nodes()
+                assert (
+                    projector_mod.get_adj_matrix(z_s)[graph_idx].detach().cpu().numpy()[:num_nodes, :num_nodes]
+                    == nx.to_numpy_array(self.nx_graphs_list[graph_idx])
+                ).all()
+            self.z_t_adj = projector_mod.get_adj_matrix(z_s)
+
+        projector_mod.do_zero_prob_forbidden_edges = patched_do_zero_prob_forbidden_edges
+        projector_mod.AbstractProjector.project = patched_project
+        projector_mod._empirical_device_patch = True
+
     def _import_projectors(self) -> dict[str, Any]:
         if self.projector_classes is not None:
             return self.projector_classes
@@ -810,6 +907,7 @@ class ConStructWrapper(BaseGenerator):
 
         try:
             projector_mod = importlib.import_module("ConStruct.projector.projector_utils")
+            self._patch_projector_device_bug(projector_mod)
             self.projector_classes = {
                 "planar": projector_mod.PlanarProjector,
                 "tree": projector_mod.TreeProjector,
@@ -1118,6 +1216,7 @@ class ConStructWrapper(BaseGenerator):
                     )
                     continue
                 optimizer.step()
+                assert_model_tensors_finite(self.model, context=f"ConStruct parameters after epoch {epoch + 1}")
                 successful_updates += 1
                 epoch_losses.append(float(loss.detach().cpu()))
                 if batch_idx % self.log_train_every_n_steps == 0:
@@ -1216,4 +1315,6 @@ class ConStructWrapper(BaseGenerator):
             graphs.extend(self._placeholder_batch_to_networkx(batch))
             if len(graphs) >= num_graphs:
                 break
-        return graphs[:num_graphs]
+        graphs = graphs[:num_graphs]
+        assert_finite_graphs(graphs, context=f"ConStruct sample output dataset={self.dataset}")
+        return graphs

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from pathlib import Path
@@ -26,22 +25,6 @@ from empirical_comparison.utils.numerics import assert_model_tensors_finite
 from empirical_comparison.utils.seed import set_seed
 
 logger = get_logger(__name__)
-
-
-def _cpu_requested(config: dict) -> bool:
-    device = str(config.get("device", "")).lower()
-    if device == "cpu":
-        return True
-    try:
-        return int(config.get("gpus", 1)) == 0
-    except Exception:
-        return False
-
-
-def _hide_cuda_for_cpu_config(config: dict) -> None:
-    if _cpu_requested(config):
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
-        logger.info("CPU model config detected; set CUDA_VISIBLE_DEVICES='' before importing model wrapper.")
 
 
 def _train_one_run(
@@ -188,7 +171,6 @@ def main() -> None:
     model_cfg_path = Path(args.model_config) if args.model_config else Path("configs/models") / f"{args.model}.yaml"
     data_cfg_path = Path(args.dataset_config) if args.dataset_config else Path("configs/datasets") / f"{args.dataset}.yaml"
     base_model_cfg = load_yaml(model_cfg_path)
-    _hide_cuda_for_cpu_config(base_model_cfg)
 
     logger.info("model=%s dataset=%s seed=%s", args.model, args.dataset, args.seed)
     logger.info("model_config=%s dataset_config=%s", model_cfg_path, data_cfg_path)

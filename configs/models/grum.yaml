@@ -118,3 +118,6 @@ graph_attributes:
   default_node_feature_dim: 1
   generated_attribute_strategy: empirical
   overwrite_generated_attributes: false
+
+# Record non-finite sanitization counts during sampling for debugging long GruM runs.
+sample_record_diagnostics: true

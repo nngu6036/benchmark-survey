@@ -42,3 +42,13 @@ This revision addresses the requested evaluation/protocol changes.
 - Patched DiGress wrapper for CUDA device safety, finite-loss/gradient/model guards, sampling finite checks, compact logging, and runtime complexity estimation.
 - Updated `configs/models/digress.yaml` to default to `gpus: 1`, `num_workers: 4`, finite guards, and quieter logs.
 - Added `scripts/estimate_digress_runtime.py` for DiGress complexity and A6000-style runtime estimates.
+
+## Wrapper/ZINC revision
+
+- Included uploaded upstream codebases for ConStruct, GruM, DisCo, and DiGress under `external/`.
+- Patched ConStruct imports and planar projector CUDA device handling.
+- Added GruM successful-update guard and sampling diagnostics.
+- Added DisCo epoch-dependent shuffling, finite-only checkpointing, successful-update tracking, and molecular auxiliary-feature disabling.
+- Added DiGress lazy dependency checks and fixed sampling batch-id semantics.
+- Updated generation postprocessing so structure-only models receive empirical molecular labels for QM9/ZINC when they did not natively generate `node_label`/`edge_type`.
+- Added guarded ZINC RDKit mapping support through `configs/datasets/zinc.yaml:rdkit_atomic_number_mapping`.

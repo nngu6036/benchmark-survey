@@ -53,3 +53,7 @@ graph_attributes:
   default_node_feature_dim: 1
   generated_attribute_strategy: empirical
   overwrite_generated_attributes: false
+
+# PyG ZINC atom_type values are categorical ids; RDKit validity requires explicit
+# atomic_number/z node attributes or a symbol-valued mapping supplied by the user.
+rdkit_atomic_number_mapping: null

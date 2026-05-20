@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import math
-import os
 import sys
 import time
 from pathlib import Path
@@ -38,22 +37,6 @@ from empirical_comparison.utils.numerics import assert_finite_graphs
 from empirical_comparison.utils.seed import set_seed
 
 logger = get_logger(__name__)
-
-
-def _cpu_requested(config: dict) -> bool:
-    device = str(config.get("device", "")).lower()
-    if device == "cpu":
-        return True
-    try:
-        return int(config.get("gpus", 1)) == 0
-    except Exception:
-        return False
-
-
-def _hide_cuda_for_cpu_config(config: dict) -> None:
-    if _cpu_requested(config):
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
-        logger.info("CPU model config detected; set CUDA_VISIBLE_DEVICES='' before importing model wrapper.")
 
 
 def _label_value(graph: nx.Graph, node: int, attr: str):
@@ -316,13 +299,31 @@ def _generate_samples(
         ref_graphs = []
     attr_stats = fit_attribute_statistics(ref_graphs, attr_schema) if ref_graphs else fit_attribute_statistics([], attr_schema)
     attr_strategy = str(attr_schema.get("generated_attribute_strategy", "empirical")).lower()
+    attr_postprocess_reason = None
     if attr_stats.has_any_attributes and attr_strategy == "empirical":
         before_cov = attribute_coverage(graphs, attr_schema)
         overwrite = bool(attr_schema.get("overwrite_generated_attributes", False))
-        if overwrite or not before_cov.get("has_any_attributes", False):
-            graphs = apply_empirical_attributes(graphs, attr_stats, seed=seed, overwrite=overwrite)
+        caps = model_capabilities(model_name)
+        molecular_like = dataset.lower() in {"qm9", "zinc"}
+        edge_count = int(before_cov.get("num_edges", 0) or 0)
+        generated_has_labels = (
+            float(before_cov.get("node_label_coverage", 0.0) or 0.0) >= 0.999
+            and (edge_count == 0 or float(before_cov.get("edge_label_coverage", 0.0) or 0.0) >= 0.999)
+        )
+        needs_label_fallback = molecular_like and (
+            not bool(caps.get("supports_node_labels", False))
+            or not bool(caps.get("supports_edge_labels", False))
+            or not generated_has_labels
+        )
+        if overwrite or not before_cov.get("has_any_attributes", False) or needs_label_fallback:
+            graphs = apply_empirical_attributes(graphs, attr_stats, seed=seed, overwrite=overwrite or needs_label_fallback)
             assert_finite_graphs(graphs, context=f"attribute postprocessing {dataset}/{model_name} seed={seed}")
             attr_postprocess_applied = True
+            attr_postprocess_reason = (
+                "overwrite_generated_attributes" if overwrite else
+                "molecular_label_fallback" if needs_label_fallback else
+                "no_generated_attributes"
+            )
     quality = quality_metrics(graphs, reference_graphs=ref_graphs, dataset=dataset)
     trajectory_metadata = None
     if draw_trajectory:
@@ -378,7 +379,9 @@ def _generate_samples(
         "graph_attributes": {
             "schema": attr_schema,
             "fallback_attribute_postprocessing_applied": attr_postprocess_applied,
+            "fallback_attribute_postprocessing_reason": attr_postprocess_reason,
             "fallback_note": "If true, attributes were attached from empirical training-set marginals by the benchmark, not generated natively by the upstream model.",
+            "model_capabilities": model_capabilities(model_name),
             "train_attribute_stats": attr_stats.to_dict(),
             "train_attribute_coverage": attribute_coverage(ref_graphs, attr_schema) if ref_graphs else {},
             "generated_attribute_coverage": attribute_coverage(graphs, attr_schema),
@@ -418,7 +421,6 @@ def main() -> None:
 
     cfg_path = Path(args.model_config) if args.model_config else Path("configs/models") / f"{args.model}.yaml"
     base_cfg = load_yaml(cfg_path)
-    _hide_cuda_for_cpu_config(base_cfg)
     _generate_samples(
         model_name=args.model,
         dataset=args.dataset,

@@ -1,0 +1,88 @@
+name: digress
+seed: 42
+
+# Path to the extracted upstream DiGress repository. You can also set DIGRESS_REPO.
+# Example: repo_root: external/DiGress
+repo_root: null
+
+# The benchmark scripts inject `dataset`; set dataset_name only if you want to override it.
+dataset_name: null
+
+# QM9 molecular path. The benchmark QM9 conversion keeps hydrogens by default,
+# so DiGress should use the with-H atom vocabulary unless this is set true.
+remove_h: false
+
+# ZINC/generic molecular path uses categorical atom classes from the benchmark
+# data. QM9 keeps DiGress's molecular domain features enabled; generic molecular
+# datasets default to dummy domain features because atom classes may not map to
+# real chemical symbols/valencies.
+use_molecular_domain_features: false
+
+# DiGress SPECTRE tensors created from benchmark NetworkX splits are stored here.
+data_subdir: outputs/digress_data/${dataset}
+
+checkpoint_path: checkpoints/digress.ckpt
+batch_size: 32
+sample_batch_size: 32
+num_epochs: 100
+learning_rate: 0.0002
+num_workers: 4
+device: cpu
+gpus: 0
+
+
+# Fail-fast numerical safety checks for Lightning training/sampling.
+finite_guard: true
+finite_guard_check_every_n_steps: 50
+suppress_epoch_cuda_memory_summary: true
+num_sanity_val_steps: 0
+lightning_progress_bar: false
+
+# Detailed wrapper logging.
+detailed_logging: true
+log_train_every_n_steps: 50
+log_sample_every_n_batches: 1
+
+# DiGress samples using all model.diffusion_steps. `sampling.num_steps` is kept
+# as metadata for benchmark consistency; use model_overrides.diffusion_steps
+# before training if you want to change DiGress's actual number of diffusion steps.
+sampling:
+  num_steps: 500
+  temperature: 1.0
+
+# Optional direct overrides into the upstream DiGress Hydra config groups.
+model_overrides: {}
+train_overrides: {}
+general_overrides: {}
+dataset_overrides: {}
+
+capabilities:
+  supports_training: true
+  supports_sampling: true
+  supports_node_features: true
+  supports_edge_features: false
+  supports_node_labels: true
+  supports_edge_labels: true
+  supports_constraints: false
+  supports_variable_size: true
+  supports_featureless_graphs: true
+
+# Benchmark-wide canonical NetworkX attribute schema.
+graph_attributes:
+  enabled: auto
+  node_feature_attr: feats
+  node_label_attr: node_label
+  edge_feature_attr: edge_attr
+  edge_label_attr: edge_type
+  graph_label_attr: graph_label
+  node_label_aliases: [label, node_type, type, atom_type]
+  node_feature_aliases: [feature, features, x]
+  edge_label_aliases: [label, edge_label, bond_type, type]
+  edge_feature_aliases: [feature, features, weight]
+  graph_label_aliases: [y, label, target]
+  add_default_node_features: true
+  add_default_node_labels: true
+  add_default_edge_labels: true
+  default_node_feature_dim: 1
+  generated_attribute_strategy: empirical
+  overwrite_generated_attributes: false

@@ -84,6 +84,18 @@ PYTHONPATH=src python scripts/train_model.py --dataset sbm --model dummy
 PYTHONPATH=src python scripts/generate_samples.py --dataset sbm --model dummy --num-samples 1024 --force
 ```
 
+Training with CPU
+```bash
+python3 scripts/train_model.py \
+  --dataset planar \
+  --model digress \
+  --model-config configs/models/digress_cpu.yaml \
+  --seed 42 \
+  --run-id 0 \
+  --use-run-paths
+```
+
+
 Run-aware synthetic repetition example:
 
 ```bash

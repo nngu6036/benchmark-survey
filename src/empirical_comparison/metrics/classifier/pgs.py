@@ -222,15 +222,29 @@ def _binary_features(ref_x: np.ndarray, gen_x: np.ndarray) -> tuple[np.ndarray, 
 
 
 def _js_score(prob_generated: np.ndarray, y_true: np.ndarray) -> dict[str, float]:
+    """Return the classifier-induced PGS-JS lower-bound score.
+
+    The classifier is trained to distinguish reference graphs (class 0) from
+    generated graphs (class 1).  If q(x) is its predicted probability of class
+    1, the held-out mean log probability of the true domain label gives the
+    usual variational lower-bound estimate of Jensen-Shannon divergence in
+    base-2 units: JSD >= E[log2 p_true] + 1.  We report sqrt(JSD) as a
+    distance-like score in [0, 1].
+    """
     p = np.clip(np.asarray(prob_generated, dtype=np.float64), 1e-12, 1.0 - 1e-12)
     y = np.asarray(y_true, dtype=int)
     p_true = np.where(y == 1, p, 1.0 - p)
     mean_ll_base2 = float(np.mean(np.log2(p_true)))
     js_div = float(np.clip(mean_ll_base2 + 1.0, 0.0, 1.0))
     score = float(np.sqrt(js_div))
+    y_pred = (p >= 0.5).astype(int)
     return {
         "score": score,
         "pgs_js_distance": score,
+        "pgs_js_divergence_lower_bound": js_div,
+        "pgs_mean_log2_true_class_probability": mean_ll_base2,
+        "pgs_mean_true_class_probability": float(np.mean(p_true)),
+        "pgs_binary_accuracy_at_0_5": float(np.mean(y_pred == y)),
     }
 
 

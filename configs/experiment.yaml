@@ -1,5 +1,8 @@
 seed: 42
 num_runs: 3
+real_dataset_num_runs: 1
+single_run_datasets: [qm9, zinc]
+molecular_datasets: [qm9, zinc]
 num_generated_graphs: 1024
 num_reference_graphs: 1024
 force: false
@@ -32,14 +35,16 @@ metrics:
   learned_feature:
     enabled: true
     reference_split: train
-    encoder: structural
+    encoder: wl_subtree
+    feature_dim: 128
+    wl_iterations: 3
     discrepancy: mmd
     bootstrap_rounds: 20
   classifier:
     enabled: true
     reference_split: test
     classifier: auto
-    metric: polygraphscore
+    metric: pgs_js_distance
     cv_folds: 4
     skip_orbits: true
     num_splits: 3

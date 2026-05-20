@@ -1,6 +1,6 @@
 # Survey Benchmark: attributed graphs, QM9/ZINC, and evaluation
 
-This repository contains the empirical benchmark scaffold for the graph-generation survey. It supports one checkpoint per model/dataset, sample metadata, descriptor/PGS/feature-space evaluation, and canonical attributed-graph handling for both synthetic graphs and molecular graphs.
+This repository contains the empirical benchmark scaffold for the graph-generation survey. It supports run-aware checkpoints/samples for repeated synthetic experiments, single-run real/molecular experiments, descriptor/PGS/feature-space evaluation, molecular RDKit validity metrics, and canonical attributed-graph handling for both synthetic graphs and molecular graphs.
 
 ## 1. Installation
 
@@ -67,6 +67,14 @@ metadata.json
 resolved_dataset_config.yaml
 ```
 
+Print basic statistics for a prepared dataset with:
+
+```bash
+PYTHONPATH=src python scripts/print_dataset_statistics.py --dataset qm9
+```
+
+This reports split-level graph counts, node/edge ranges, density, average degree, connectedness, self-loop rate, and attribute summary fields. Add `--json` for machine-readable output.
+
 ## 3. Train models on featureless or attributed graphs
 
 Single model and dataset:
@@ -75,6 +83,28 @@ Single model and dataset:
 PYTHONPATH=src python scripts/train_model.py --dataset sbm --model dummy
 PYTHONPATH=src python scripts/generate_samples.py --dataset sbm --model dummy --num-samples 1024 --force
 ```
+
+Run-aware synthetic repetition example:
+
+```bash
+PYTHONPATH=src python scripts/train_model.py \
+  --dataset sbm \
+  --model dummy \
+  --seed 42 \
+  --run-id 0 \
+  --use-run-paths
+
+PYTHONPATH=src python scripts/generate_samples.py \
+  --dataset sbm \
+  --model dummy \
+  --num-samples 1024 \
+  --seed 42 \
+  --run-id 0 \
+  --use-run-paths \
+  --force
+```
+
+Run-aware outputs are stored as `outputs/checkpoints/<dataset>/<model>/run_000/...`, `outputs/samples/<dataset>/<model>/run_000.pkl`, and `outputs/metrics/<dataset>/<model>/run_000/*.json`.
 
 Attributed molecular example:
 
@@ -105,26 +135,13 @@ PYTHONPATH=src python scripts/draw_generated_graphs.py \
   --show-node-labels
 ```
 
-A complete loop over all registered datasets and models can be run as follows:
+A complete benchmark run is configured in `configs/experiment.yaml` and executed with:
 
 ```bash
-datasets=(sbm planar qm9 zinc)
-models=(dummy construct digress disco edp_gnn graphguide grum)
-
-for dataset in "${datasets[@]}"; do
-  PYTHONPATH=src python scripts/prepare_data.py --dataset "$dataset" --force
-  for model in "${models[@]}"; do
-    PYTHONPATH=src python scripts/train_model.py \
-      --dataset "$dataset" \
-      --model "$model"
-    PYTHONPATH=src python scripts/generate_samples.py \
-      --dataset "$dataset" \
-      --model "$model" \
-      --num-samples 1024 \
-      --force
-  done
-done
+PYTHONPATH=src python scripts/run_benchmark.py
 ```
+
+The default protocol uses `num_runs: 3` for synthetic datasets and `real_dataset_num_runs: 1` for `qm9` and `zinc`. Synthetic run seeds are `seed + 1000 * run_id`; real/molecular datasets keep the single-run legacy layout. The same file also makes `num_reference_graphs: 1024` real by passing `--max-reference-graphs 1024` to all metric scripts.
 
 For expensive upstream wrappers, start with `dummy`, `construct`, or `disco` on small `--max-graphs` molecular subsets before running full experiments.
 
@@ -143,17 +160,31 @@ For attributed datasets such as QM9 and ZINC, the benchmark still runs all wrapp
 
 All evaluation scripts accept the same dataset/model selection pattern. The commands below work for synthetic graphs (`sbm`, `planar`) and attributed molecular graphs (`qm9`, `zinc`) after samples have been generated.
 
-Descriptor MMD metrics:
+Generic descriptor MMD metrics for non-molecular datasets:
 
 ```bash
 PYTHONPATH=src python scripts/evaluate_descriptor_metrics.py \
-  --dataset qm9 \
-  --model disco \
+  --dataset sbm \
+  --model dummy \
   --reference-split test \
+  --max-reference-graphs 1024 \
+  --max-generated-graphs 1024 \
   --skip-orbit
 ```
 
-For all datasets, this reports the shared descriptor schema: degree MMD, clustering MMD, spectral MMD, structural-summary MMD, optional orbit MMD, and `attribute_mmd` when attributes are present. Molecular datasets such as QM9 additionally report validity, uniqueness, novelty, atom-type MMD, and bond-type MMD using the benchmark graph-attribute schema.
+Molecular descriptor metrics for QM9/ZINC:
+
+```bash
+PYTHONPATH=src python scripts/evaluate_molecular_descriptor_metrics.py \
+  --dataset qm9 \
+  --model disco \
+  --reference-split test \
+  --max-reference-graphs 1024 \
+  --max-generated-graphs 1024 \
+  --skip-orbit
+```
+
+The generic descriptor script reports degree MMD, clustering MMD, spectral MMD, structural-summary MMD, optional orbit MMD, and `attribute_mmd` when attributes are present. The molecular descriptor script reports those generic descriptors plus `atom_type_mmd`, `bond_type_mmd`, RDKit sanitization validity, uniqueness, novelty, and `valid_unique_novel_rate`. Uniqueness and novelty are computed on canonical RDKit SMILES of valid generated molecules; novelty compares against the training split.
 
 Classifier/PGS-JS metric:
 
@@ -167,18 +198,21 @@ PYTHONPATH=src python scripts/evaluate_classifier_metrics.py \
   --skip-orbits
 ```
 
-`--classifier auto` uses TabPFN when installed and otherwise falls back to standardized logistic regression. The script reports only `pgs_js_distance`; the default descriptor pool includes structural descriptors and an `attributes` descriptor when attributes are available.
+`--classifier auto` uses TabPFN when installed and otherwise falls back to standardized logistic regression. The main reported value is `pgs_js_distance`; the payload also stores the JS-divergence lower bound, selected descriptor, split-level scores, feature dimensions, and resolved classifier. The default descriptor pool includes structural descriptors and an `attributes` descriptor when attributes are available.
 
-Learned/fallback feature-space MMD:
+Feature-space MMD:
 
 ```bash
 PYTHONPATH=src python scripts/evaluate_learned_feature_metrics.py \
   --dataset qm9 \
   --model disco \
-  --reference-split train
+  --reference-split train \
+  --encoder wl_subtree \
+  --max-reference-graphs 1024 \
+  --max-generated-graphs 1024
 ```
 
-The default encoder is the deterministic structural fallback encoder with attribute-aware feature components enabled. Add `--no-attribute-features` to evaluate only structural features.
+The default encoder is now a fitted Weisfeiler-Lehman subtree feature encoder (`wl_subtree`) trained only on the reference split, with optional SVD projection and attribute-aware feature components. `structural` and `random_gin` remain available as ablations/backward-compatible fallbacks, but neither should be described as a trained neural learned-feature metric.
 
 Loop over all datasets and all models:
 
@@ -188,14 +222,27 @@ models=(dummy construct digress disco edp_gnn graphguide grum)
 
 for dataset in "${datasets[@]}"; do
   for model in "${models[@]}"; do
-    PYTHONPATH=src python scripts/evaluate_descriptor_metrics.py \
-      --dataset "$dataset" \
-      --model "$model" \
-      --skip-orbit
+    if [[ "$dataset" == "qm9" || "$dataset" == "zinc" ]]; then
+      PYTHONPATH=src python scripts/evaluate_molecular_descriptor_metrics.py \
+        --dataset "$dataset" \
+        --model "$model" \
+        --max-reference-graphs 1024 \
+        --max-generated-graphs 1024 \
+        --skip-orbit
+    else
+      PYTHONPATH=src python scripts/evaluate_descriptor_metrics.py \
+        --dataset "$dataset" \
+        --model "$model" \
+        --max-reference-graphs 1024 \
+        --max-generated-graphs 1024 \
+        --skip-orbit
+    fi
 
     PYTHONPATH=src python scripts/evaluate_classifier_metrics.py \
       --dataset "$dataset" \
       --model "$model" \
+      --max-reference-graphs 1024 \
+      --max-generated-graphs 1024 \
       --num-splits 5 \
       --cv-folds 4 \
       --classifier auto \
@@ -204,7 +251,10 @@ for dataset in "${datasets[@]}"; do
     PYTHONPATH=src python scripts/evaluate_learned_feature_metrics.py \
       --dataset "$dataset" \
       --model "$model" \
-      --reference-split train
+      --reference-split train \
+      --encoder wl_subtree \
+      --max-reference-graphs 1024 \
+      --max-generated-graphs 1024
   done
 done
 ```
@@ -306,22 +356,47 @@ Final checkpoint with EMA state \\
 
 ## 6. Paper-style PGS-JS protocol
 
-`scripts/evaluate_classifier_metrics.py` implements a PGS-JS classifier protocol:
+`scripts/evaluate_classifier_metrics.py` implements a balanced, held-out PGS-JS classifier protocol:
 
-1. Load reference and generated graphs.
-2. Randomly split each class into fit and held-out test halves.
-3. For each descriptor, run stratified cross-validation on the fit half.
-4. Select the descriptor with the best validation score.
-5. Train the final classifier on the full fit half for the selected descriptor.
-6. Report the selected descriptor's held-out PGS-JS distance.
+1. Load the reference split and generated samples; apply `--max-reference-graphs` and `--max-generated-graphs`.
+2. Balance the two classes by using `min(num_reference_graphs, num_generated_graphs)` graphs per class. This count is recorded as `balanced_graphs_per_class_used`.
+3. For each repeated partition, randomly split reference and generated graphs into fit and held-out test halves.
+4. For each descriptor, fit the descriptor on the fit half, run stratified cross-validation on the fit half, and score the held-out validation folds with the PGS-JS lower-bound objective.
+5. Select the descriptor with the highest cross-validation score, fit the final classifier on the full fit half, and evaluate on the held-out test half.
+6. Average `pgs_js_distance` across repeated partitions and report the split standard deviation.
 
-The only reported benchmark metric is `pgs_js_distance`; lower is better.
+For held-out examples with true domain label probability `p_true`, the script computes `JSD_lb = clip(mean(log2(p_true)) + 1, 0, 1)` and reports `pgs_js_distance = sqrt(JSD_lb)`. Lower is better because a classifier that cannot distinguish generated from reference graphs gives a score near 0, while an easily separable generated distribution gives a higher score. The payload also records `pgs_js_divergence_lower_bound`, `pgs_mean_true_class_probability`, `pgs_binary_accuracy_at_0_5`, the selected descriptor, descriptor-wise CV/test scores, and the resolved classifier backend.
 
 ## 7. Useful output locations
 
 ```text
 outputs/checkpoints/<dataset>/<model>/...   # trained checkpoint for each model/dataset
-outputs/samples/<dataset>/...               # generated graph pickles and sample metadata
+outputs/samples/<dataset>/...               # legacy single-run generated graph pickles and sample metadata
+outputs/samples/<dataset>/<model>/run_000.pkl # run-aware synthetic samples
 outputs/runs/<dataset>/<model>/...          # resolved train configs and training metadata
-outputs/metrics/<dataset>/<model>/...       # metric payloads
+outputs/metrics/<dataset>/<model>/...       # legacy single-run metric payloads
+outputs/metrics/<dataset>/<model>/run_000/  # run-aware synthetic metric payloads
+```
+
+## DiGress wrapper notes
+
+The revised DiGress wrapper can use the included upstream code at `external/DiGress`. You can still override this with `DIGRESS_REPO=/path/to/DiGress` or `repo_root` in `configs/models/digress.yaml`.
+
+Typical commands on a two-GPU server are:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src python scripts/train_model.py --model digress --dataset sbm --run-id 0 --use-run-paths
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src python scripts/generate_samples.py --model digress --dataset sbm --run-id 0 --use-run-paths --num-samples 1024 --force
+
+CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python scripts/train_model.py --model digress --dataset planar --run-id 0 --use-run-paths
+CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python scripts/generate_samples.py --model digress --dataset planar --run-id 0 --use-run-paths --num-samples 1024 --force
+```
+
+The current default DiGress config uses `num_epochs: 100`, `batch_size: 32`, `sample_batch_size: 32`, and `diffusion_steps: 500`. Synthetic SBM and planar configs use `num_graphs: 10240` and `num_nodes: 64`, which gives approximately 8192/1024/1024 train/validation/test graphs under the 80/10/10 split.
+
+To print rough operation-count and runtime estimates:
+
+```bash
+PYTHONPATH=src python scripts/estimate_digress_runtime.py --dataset sbm
+PYTHONPATH=src python scripts/estimate_digress_runtime.py --dataset planar
 ```

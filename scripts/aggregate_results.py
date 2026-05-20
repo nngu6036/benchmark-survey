@@ -26,6 +26,7 @@ EXCLUDE_FROM_METRIC_AGG = {
     "seed",
     "base_seed",
     "is_aggregate",
+    "run_id",
 }
 
 
@@ -42,6 +43,10 @@ def _flatten_results(obj: dict[str, Any]) -> dict[str, Any]:
         row["seed"] = protocol["seed"]
     if "base_seed" in protocol:
         row["base_seed"] = protocol["base_seed"]
+    if obj.get("run_id") is not None:
+        row["run_id"] = obj.get("run_id")
+    elif protocol.get("run_id") is not None:
+        row["run_id"] = protocol.get("run_id")
     for k, v in (obj.get("results", {}) or {}).items():
         if isinstance(v, (int, float, str, bool)) or v is None:
             row[k] = v

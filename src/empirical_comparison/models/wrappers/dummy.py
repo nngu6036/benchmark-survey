@@ -9,6 +9,7 @@ import numpy as np
 from empirical_comparison.graphs.attributes import apply_empirical_attributes, fit_attribute_statistics, normalize_schema
 from empirical_comparison.models.base import BaseGenerator
 from empirical_comparison.utils.progress import update_progress
+from empirical_comparison.utils.numerics import assert_finite_graphs
 from empirical_comparison.utils.io import load_pickle, save_pickle
 
 
@@ -66,6 +67,8 @@ class DummyGraphGenerator(BaseGenerator):
         if train_graphs:
             nodes = np.asarray([g.number_of_nodes() for g in train_graphs], dtype=float)
             densities = np.asarray([nx.density(g) if g.number_of_nodes() > 1 else 0.0 for g in train_graphs], dtype=float)
+            if not np.isfinite(nodes).all() or not np.isfinite(densities).all():
+                raise FloatingPointError("DummyGraphGenerator received non-finite training graph statistics.")
             self.num_nodes = max(1, int(round(float(nodes.mean()))))
             self.node_std = float(nodes.std(ddof=0))
             self.edge_prob = float(np.clip(densities.mean(), 0.0, 1.0))
@@ -97,4 +100,5 @@ class DummyGraphGenerator(BaseGenerator):
             update_progress(progress_callback, 1)
         if self.attr_stats:
             graphs = apply_empirical_attributes(graphs, self.attr_stats, seed=seed, overwrite=True)
+        assert_finite_graphs(graphs, context="dummy.sample output")
         return graphs

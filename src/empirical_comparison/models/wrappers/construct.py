@@ -1067,6 +1067,7 @@ class ConStructWrapper(BaseGenerator):
         self.model.train()
         last_train_loss = None
         last_val_loss = None
+        successful_updates = 0
         for epoch in range(n_epochs):
             epoch_started_at = time.perf_counter()
             self._log("epoch_start epoch=%d/%d", epoch + 1, n_epochs)
@@ -1117,6 +1118,7 @@ class ConStructWrapper(BaseGenerator):
                     )
                     continue
                 optimizer.step()
+                successful_updates += 1
                 epoch_losses.append(float(loss.detach().cpu()))
                 if batch_idx % self.log_train_every_n_steps == 0:
                     self._log(
@@ -1152,6 +1154,8 @@ class ConStructWrapper(BaseGenerator):
             if skipped_batches:
                 self._log("epoch_skipped_batches epoch=%d/%d skipped=%d", epoch + 1, n_epochs, skipped_batches)
 
+        if successful_updates == 0:
+            raise FloatingPointError("ConStruct training completed without any finite optimizer updates; refusing to save an unusable checkpoint.")
         self.model.eval()
         self._save_checkpoint()
         self._log("checkpoint_saved path=%s total_duration=%.2fs", self.checkpoint_path, time.perf_counter() - started_at)
@@ -1163,6 +1167,7 @@ class ConStructWrapper(BaseGenerator):
                     "num_epochs": n_epochs,
                     "batch_size": batch_size,
                     "last_train_loss": last_train_loss,
+                    "successful_updates": successful_updates,
                     "last_val_loss": last_val_loss,
                     "checkpoint_path": str(self.checkpoint_path),
                     "meta": asdict(meta),

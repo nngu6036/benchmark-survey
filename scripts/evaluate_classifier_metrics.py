@@ -40,8 +40,8 @@ def _load_reference_graphs(dataset: str, dataset_root: str, reference_split: str
     return graphs
 
 
-def _load_generated_graphs(dataset: str, model: str) -> list:
-    sample_file = existing_sample_path(dataset, model)
+def _load_generated_graphs(dataset: str, model: str, *, run_id: int | None = None) -> list:
+    sample_file = existing_sample_path(dataset, model, run_id=run_id)
     if not sample_file.exists():
         raise FileNotFoundError(f"Generated sample file not found: {sample_file}. Run generate_samples.py first.")
     graphs = load_pickle(sample_file)
@@ -61,26 +61,42 @@ def _subsample(graphs: list, max_graphs: int | None, seed: int) -> list:
 
 
 def _pgs_js_mean_std(split_payloads: list[dict]) -> dict[str, float]:
-    values: list[float] = []
+    per_key: dict[str, list[float]] = defaultdict(list)
     for payload in split_payloads:
         results = payload.get("results") or {}
         value = results.get("pgs_js_distance", results.get("polygraphscore"))
         if isinstance(value, (int, float, np.number)):
-            values.append(float(value))
-    if not values:
+            per_key["pgs_js_distance"].append(float(value))
+        for key in (
+            "pgs_js_divergence_lower_bound",
+            "pgs_mean_log2_true_class_probability",
+            "pgs_mean_true_class_probability",
+            "pgs_binary_accuracy_at_0_5",
+        ):
+            if isinstance(results.get(key), (int, float, np.number)):
+                per_key[key].append(float(results[key]))
+    if not per_key.get("pgs_js_distance"):
         raise RuntimeError("PGS-JS evaluation did not produce any numeric pgs_js_distance values.")
-    arr = np.asarray(values, dtype=np.float64)
-    mean = float(arr.mean())
-    return {
-        "pgs_js_distance": mean,
-        "pgs_js_distance_split_mean": mean,
-        "pgs_js_distance_split_std": float(arr.std(ddof=0)),
-    }
+    out: dict[str, float] = {}
+    for key, values in per_key.items():
+        arr = np.asarray(values, dtype=np.float64)
+        mean = float(arr.mean())
+        out[key] = mean
+        out[f"{key}_split_mean"] = mean
+        out[f"{key}_split_std"] = float(arr.std(ddof=0))
+    return out
 
 
 def _strip_to_pgs_js(payload: dict) -> dict:
     results = payload.get("results") or {}
+    clean_results = {
+        k: float(v)
+        for k, v in results.items()
+        if str(k).startswith("pgs_") and isinstance(v, (int, float, np.number))
+    }
     score = results.get("pgs_js_distance", results.get("polygraphscore"))
+    if isinstance(score, (int, float, np.number)):
+        clean_results["pgs_js_distance"] = float(score)
     clean_descriptors = []
     for item in payload.get("descriptor_results", []):
         clean_descriptors.append({
@@ -88,13 +104,14 @@ def _strip_to_pgs_js(payload: dict) -> dict:
             "cv_score": item.get("cv_score"),
             "cv_score_std": item.get("cv_score_std"),
             "test_score": item.get("test_score"),
+            "test_metrics": item.get("test_metrics", {}),
             "classifier": item.get("classifier"),
             "num_fit_graphs_per_class": item.get("num_fit_graphs_per_class"),
             "num_test_graphs_per_class": item.get("num_test_graphs_per_class"),
             "feature_dim": item.get("feature_dim"),
         })
     return {
-        "results": {"pgs_js_distance": float(score)} if isinstance(score, (int, float, np.number)) else {},
+        "results": clean_results,
         "descriptor_results": clean_descriptors,
         "best_descriptor": payload.get("best_descriptor"),
         "classifier": payload.get("classifier"),
@@ -128,8 +145,10 @@ def _descriptor_summary(split_payloads: list[dict]) -> dict[str, dict[str, float
 
 def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
     start = time.perf_counter()
-    ref_graphs = _subsample(_load_reference_graphs(args.dataset, args.dataset_root, args.reference_split), args.max_graphs, seed)
-    gen_graphs = _subsample(_load_generated_graphs(args.dataset, args.model), args.max_graphs, seed + 1)
+    max_ref_graphs = args.max_reference_graphs if args.max_reference_graphs is not None else args.max_graphs
+    max_gen_graphs = args.max_generated_graphs if args.max_generated_graphs is not None else args.max_graphs
+    ref_graphs = _subsample(_load_reference_graphs(args.dataset, args.dataset_root, args.reference_split), max_ref_graphs, seed)
+    gen_graphs = _subsample(_load_generated_graphs(args.dataset, args.model, run_id=args.run_id), max_gen_graphs, seed + 1)
 
     attr_schema = normalize_schema({
         "graph_attributes": {
@@ -207,6 +226,7 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
         "metric_family": "polygraphscore_classifier",
         "runtime_seconds": time.perf_counter() - start,
         "metric_name": "PGS-JS",
+        "run_id": args.run_id,
         "feature_representation": {
             "name": "descriptor_wise_polygraphscore",
             "descriptors_requested": descriptor_names,
@@ -224,6 +244,10 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
         "protocol": {
             "num_reference_graphs": len(ref_graphs),
             "num_generated_graphs": len(gen_graphs),
+            "max_reference_graphs": max_ref_graphs,
+            "max_generated_graphs": max_gen_graphs,
+            "balanced_graphs_per_class_used": min(len(ref_graphs), len(gen_graphs)),
+            "run_id": args.run_id,
             "reference_split": args.reference_split,
             "fit_test_split": "Each PGS partition randomly halves reference and generated graphs into fit/test sets; descriptor selection uses CV on the fit half; final PGS is evaluated on the held-out test half.",
             "descriptor_selection": "Select descriptor with maximum CV lower-bound score, then report its held-out test score.",
@@ -246,7 +270,7 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
         "split_results": split_payloads,
     }
     if output_path is None:
-        output_path = metric_path(args.dataset, args.model, METRIC_FILENAME)
+        output_path = metric_path(args.dataset, args.model, METRIC_FILENAME, run_id=args.run_id)
     save_json(payload, output_path)
     logger.info("Saved PGS metrics to %s", output_path)
     return payload
@@ -259,7 +283,10 @@ def main() -> None:
     parser.add_argument("--dataset-root", type=str, default="outputs/datasets")
     parser.add_argument("--reference-split", choices=["train", "val", "test"], default="test")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max-graphs", type=int, default=None)
+    parser.add_argument("--max-graphs", type=int, default=None, help="Backward-compatible cap applied to both reference and generated graphs unless the more specific caps are set.")
+    parser.add_argument("--max-reference-graphs", type=int, default=None)
+    parser.add_argument("--max-generated-graphs", type=int, default=None)
+    parser.add_argument("--run-id", type=int, default=None, help="Evaluate samples stored under a run-specific path, e.g. outputs/runs/<dataset>/<model>/run_00.")
     parser.add_argument("--num-splits", type=int, default=3, help="Repeated PGS fit/test partitions for the sampled graph set.")
     parser.add_argument("--descriptors", nargs="+", default=None, help="Descriptors: degree clustering spectral orbit4 orbit5 gin attributes concat")
     parser.add_argument("--skip-orbit", action="store_true", help="Backward-compatible alias for --skip-orbits.")

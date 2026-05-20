@@ -1,7 +1,7 @@
 name: sbm
 seed: 42
 root: outputs/datasets
-num_graphs: 1024
+num_graphs: 10240
 num_nodes: 64
 num_blocks: 4
 p_in: 0.25

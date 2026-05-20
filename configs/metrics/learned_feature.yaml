@@ -1,6 +1,8 @@
 reference_split: train
-encoder: structural
+encoder: wl_subtree
+wl_iterations: 3
+feature_dim: 128
 discrepancy: mmd
-feature_dim: null
-note: structural is the default dependency-light feature encoder; random_gin is retained only for backward compatibility.
-reference_split_note: Generated-vs-training graph representation MMD by default.
+bootstrap_rounds: 20
+note: wl_subtree is a fitted Weisfeiler-Lehman subtree feature encoder. structural and random_gin are retained as lightweight ablations/backward-compatible fallbacks.
+reference_split_note: Generated-vs-training feature-space MMD by default.

@@ -19,6 +19,7 @@ import torch
 import yaml
 
 from empirical_comparison.utils.progress import update_progress
+from empirical_comparison.utils.numerics import assert_model_tensors_finite, assert_torch_grads_finite
 from torch.utils.data import DataLoader, TensorDataset
 
 
@@ -402,14 +403,33 @@ class GruMWrapper:
                     x, adj, mask = self._rand_perm(x, adj, mask)
                 optimizer.zero_grad(set_to_none=True)
                 loss, loss_x, loss_adj = loss_fn(model, x, adj, mask)
+                if not torch.isfinite(loss.detach()).all():
+                    print(
+                        f"[GruM:{self.dataset_name}] skipping non-finite training loss "
+                        f"at epoch {epoch + 1}: {float(loss.detach().cpu())}",
+                        flush=True,
+                    )
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
                 loss.backward()
+                try:
+                    assert_torch_grads_finite(model, context=f"GruM epoch {epoch + 1}")
+                except FloatingPointError as exc:
+                    print(f"[GruM:{self.dataset_name}] skipping non-finite gradients: {exc}", flush=True)
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
                 if grad_clip is not None:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip, error_if_nonfinite=False)
+                    if torch.is_tensor(grad_norm) and not torch.isfinite(grad_norm).all():
+                        print(f"[GruM:{self.dataset_name}] skipping non-finite clipped gradient norm", flush=True)
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
                 optimizer.step()
+                assert_model_tensors_finite(model, context=f"GruM parameters after epoch {epoch + 1}")
                 ema.update(model.parameters())
                 losses_total.append(float(loss.detach().cpu()))
-                losses_x.append(float(loss_x.detach().cpu()))
-                losses_adj.append(float(loss_adj.detach().cpu()))
+                losses_x.append(float(loss_x.detach().cpu()) if torch.isfinite(loss_x.detach()).all() else math.nan)
+                losses_adj.append(float(loss_adj.detach().cpu()) if torch.isfinite(loss_adj.detach()).all() else math.nan)
                 if batch_log_every > 0 and (len(losses_total) % batch_log_every == 0):
                     print(
                         f"[GruM:{self.dataset_name}] epoch {epoch + 1}/{num_epochs} "

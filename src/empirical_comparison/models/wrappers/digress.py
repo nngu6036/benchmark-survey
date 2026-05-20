@@ -8,6 +8,7 @@ import random
 import shutil
 import sys
 import time
+import types
 import warnings
 from pathlib import Path
 from typing import Any
@@ -17,8 +18,15 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 from pytorch_lightning import Trainer
+from pytorch_lightning.callbacks import Callback
 
 from empirical_comparison.models.base import BaseGenerator
+from empirical_comparison.utils.numerics import (
+    assert_finite_graphs,
+    assert_model_tensors_finite,
+    assert_torch_grads_finite,
+    assert_torch_loss_finite,
+)
 from empirical_comparison.utils.logging import get_logger
 from empirical_comparison.utils.progress import update_progress
 
@@ -43,6 +51,50 @@ class _NoOpSamplingMetrics(torch.nn.Module):
 
     def forward(self, *args, **kwargs) -> dict[str, Any]:
         return {"disabled": True, "reason": self.reason}
+
+
+class _FiniteGuardCallback(Callback):
+    """Lightning callback that fails fast on non-finite DiGress training states.
+
+    Upstream DiGress relies on Lightning's automatic optimization. Without a
+    callback, a NaN loss/gradient can silently reach the optimizer step and leave
+    a corrupted checkpoint. This callback checks losses every batch and checks
+    gradients/parameters periodically before/after optimizer updates.
+    """
+
+    def __init__(self, check_every_n_steps: int = 50) -> None:
+        super().__init__()
+        self.check_every_n_steps = max(1, int(check_every_n_steps))
+
+    def _should_check(self, trainer: Any, batch_idx: int | None = None) -> bool:
+        step = int(getattr(trainer, "global_step", 0) or 0)
+        if batch_idx is not None and step == 0:
+            step = int(batch_idx) + 1
+        return step % self.check_every_n_steps == 0
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, *args, **kwargs) -> None:  # noqa: D401
+        loss = outputs.get("loss") if isinstance(outputs, dict) else outputs
+        if loss is not None:
+            assert_torch_loss_finite(loss, context=f"DiGress train batch {batch_idx}")
+        if self._should_check(trainer, batch_idx):
+            assert_model_tensors_finite(pl_module, context=f"DiGress train batch {batch_idx} end")
+
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, *args, **kwargs) -> None:
+        loss = outputs.get("loss") if isinstance(outputs, dict) else outputs
+        if loss is not None:
+            assert_torch_loss_finite(loss, context=f"DiGress validation batch {batch_idx}")
+
+    def on_before_optimizer_step(self, trainer, pl_module, optimizer, *args, **kwargs) -> None:
+        assert_torch_grads_finite(pl_module, context="DiGress before optimizer step")
+
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx, *args, **kwargs) -> None:
+        if self._should_check(trainer, batch_idx):
+            assert_model_tensors_finite(pl_module, context=f"DiGress train batch {batch_idx} start")
+
+    def on_train_batch_end_post(self, trainer, pl_module, outputs, batch, batch_idx, *args, **kwargs) -> None:
+        # Compatibility hook for Lightning versions that expose a post-step callback.
+        if self._should_check(trainer, batch_idx):
+            assert_model_tensors_finite(pl_module, context=f"DiGress train batch {batch_idx} end")
 
 
 class _BenchmarkMolecularInfos:
@@ -208,6 +260,9 @@ class DiGressWrapper(BaseGenerator):
         self.detailed_logging = bool(config.get("detailed_logging", True))
         self.log_train_every_n_steps = max(1, int(config.get("log_train_every_n_steps", 1)))
         self.log_sample_every_n_batches = max(1, int(config.get("log_sample_every_n_batches", 1)))
+        self.finite_guard = bool(config.get("finite_guard", True))
+        self.finite_guard_check_every_n_steps = max(1, int(config.get("finite_guard_check_every_n_steps", 50)))
+        self.suppress_epoch_cuda_memory_summary = bool(config.get("suppress_epoch_cuda_memory_summary", True))
         self._molecular_atom_class_count: int | None = None
 
         default_repo_root = Path(__file__).resolve().parents[4] / "external" / "DiGress"
@@ -302,9 +357,110 @@ class DiGressWrapper(BaseGenerator):
                 "(notably torch_geometric, pytorch_lightning, wandb, hydra-core/omegaconf, and optionally graph-tool) "
                 f"and set DIGRESS_REPO correctly. Missing module: {missing!r}."
             ) from exc
+        self._patch_upstream_device_and_stability_issues()
         self._patch_spectre_dataset_process()
         self.repo_loaded = True
         self._log("imported upstream DiGress modules duration=%.3fs", time.perf_counter() - started_at)
+
+    def _patch_upstream_device_and_stability_issues(self) -> None:
+        """Patch small upstream DiGress issues that otherwise break benchmark runs.
+
+        The uploaded DiGress repository was written against older PyTorch/PyG
+        defaults. Some helper functions create CPU tensors inside CUDA training
+        or sampling paths, and the discrete sampler can fail late with an opaque
+        multinomial error if probabilities become non-finite. The wrapper patches
+        those functions at runtime so users do not have to edit the external repo.
+        """
+        utils_mod = importlib.import_module("src.utils")
+        diffusion_utils = importlib.import_module("src.diffusion.diffusion_utils")
+        extra_features_mod = importlib.import_module("src.diffusion.extra_features")
+
+        if not getattr(utils_mod, "_empirical_comparison_device_patch", False):
+            PlaceHolder = utils_mod.PlaceHolder
+
+            def encode_no_edge(E):
+                if len(E.shape) != 4:
+                    raise ValueError(f"encode_no_edge expects a 4D dense edge tensor, got shape={tuple(E.shape)}")
+                if E.shape[-1] == 0:
+                    return E
+                no_edge = torch.sum(E, dim=3) == 0
+                first_elt = E[:, :, :, 0]
+                first_elt[no_edge] = 1
+                E[:, :, :, 0] = first_elt
+                diag = torch.eye(E.shape[1], dtype=torch.bool, device=E.device).unsqueeze(0).expand(E.shape[0], -1, -1)
+                E[diag] = 0
+                return E
+
+            def normalize(X, E, y, norm_values, norm_biases, node_mask):
+                X = (X - norm_biases[0]) / norm_values[0]
+                E = (E - norm_biases[1]) / norm_values[1]
+                y = (y - norm_biases[2]) / norm_values[2]
+                diag = torch.eye(E.shape[1], dtype=torch.bool, device=E.device).unsqueeze(0).expand(E.shape[0], -1, -1)
+                E[diag] = 0
+                return PlaceHolder(X=X, E=E, y=y).mask(node_mask)
+
+            utils_mod.encode_no_edge = encode_no_edge
+            utils_mod.normalize = normalize
+            utils_mod._empirical_comparison_device_patch = True
+
+        if not getattr(diffusion_utils, "_empirical_comparison_sampling_patch", False):
+            PlaceHolder = utils_mod.PlaceHolder
+
+            def sample_discrete_features(probX, probE, node_mask):
+                """Device-safe, finite-checked version of DiGress's multinomial sampler."""
+                if not torch.isfinite(probX).all().item():
+                    raise FloatingPointError("DiGress sampler received non-finite node probabilities.")
+                if not torch.isfinite(probE).all().item():
+                    raise FloatingPointError("DiGress sampler received non-finite edge probabilities.")
+                bs, n, _ = probX.shape
+                probX = probX.clone()
+                probE = probE.clone()
+
+                probX[~node_mask] = 1.0 / probX.shape[-1]
+                probX = probX.reshape(bs * n, -1)
+                probX_sum = probX.sum(dim=-1, keepdim=True)
+                if (probX_sum <= 0).any().item() or not torch.isfinite(probX_sum).all().item():
+                    raise FloatingPointError("DiGress sampler received invalid node probability rows.")
+                probX = probX / probX_sum.clamp_min(1e-12)
+                X_t = probX.multinomial(1).reshape(bs, n)
+
+                inverse_edge_mask = ~(node_mask.unsqueeze(1) * node_mask.unsqueeze(2))
+                diag_mask = torch.eye(n, dtype=torch.bool, device=probE.device).unsqueeze(0).expand(bs, -1, -1)
+                probE[inverse_edge_mask] = 1.0 / probE.shape[-1]
+                probE[diag_mask] = 1.0 / probE.shape[-1]
+                probE = probE.reshape(bs * n * n, -1)
+                probE_sum = probE.sum(dim=-1, keepdim=True)
+                if (probE_sum <= 0).any().item() or not torch.isfinite(probE_sum).all().item():
+                    raise FloatingPointError("DiGress sampler received invalid edge probability rows.")
+                probE = probE / probE_sum.clamp_min(1e-12)
+                E_t = probE.multinomial(1).reshape(bs, n, n)
+                E_t = torch.triu(E_t, diagonal=1)
+                E_t = E_t + torch.transpose(E_t, 1, 2)
+                return PlaceHolder(X=X_t, E=E_t, y=torch.zeros(bs, 0, device=X_t.device, dtype=X_t.dtype))
+
+            diffusion_utils.sample_discrete_features = sample_discrete_features
+            diffusion_utils._empirical_comparison_sampling_patch = True
+
+        if not getattr(extra_features_mod, "_empirical_comparison_laplacian_patch", False):
+            def compute_laplacian(adjacency, normalize: bool):
+                diag = torch.sum(adjacency, dim=-1)
+                n = diag.shape[-1]
+                D = torch.diag_embed(diag)
+                combinatorial = D - adjacency
+                if not normalize:
+                    return (combinatorial + combinatorial.transpose(1, 2)) / 2
+                diag0 = diag.clone()
+                diag = diag.clone()
+                diag[diag == 0] = 1e-12
+                diag_norm = 1 / torch.sqrt(diag)
+                D_norm = torch.diag_embed(diag_norm)
+                eye = torch.eye(n, dtype=adjacency.dtype, device=adjacency.device).unsqueeze(0)
+                L = eye - D_norm @ adjacency @ D_norm
+                L[diag0 == 0] = 0
+                return (L + L.transpose(1, 2)) / 2
+
+            extra_features_mod.compute_laplacian = compute_laplacian
+            extra_features_mod._empirical_comparison_laplacian_patch = True
 
     def _patch_spectre_dataset_process(self) -> None:
         """Patch a small upstream SPECTRE processing issue at runtime.
@@ -690,6 +846,7 @@ class DiGressWrapper(BaseGenerator):
             domain_features=domain_features,
         )
         self._clear_lightning_hparams(model)
+        self._patch_model_runtime_methods(model)
 
         self.datamodule = datamodule
         self.dataset_infos = dataset_infos
@@ -740,23 +897,130 @@ class DiGressWrapper(BaseGenerator):
     def _make_trainer(self) -> Trainer:
         assert self.cfg is not None
         use_gpu = self.cfg.general.gpus > 0 and torch.cuda.is_available()
+        callbacks: list[Any] = []
+        if self.finite_guard:
+            callbacks.append(_FiniteGuardCallback(check_every_n_steps=self.finite_guard_check_every_n_steps))
         kwargs = dict(
             accelerator="gpu" if use_gpu else "cpu",
-            devices=self.cfg.general.gpus if use_gpu else 1,
-            max_epochs=self.cfg.train.n_epochs,
-            enable_progress_bar=False,
-            logger=[],
-            callbacks=[],
+            devices=int(self.cfg.general.gpus) if use_gpu else 1,
+            max_epochs=int(self.cfg.train.n_epochs),
+            enable_progress_bar=bool(self.config.get("lightning_progress_bar", False)),
+            logger=False,
+            callbacks=callbacks,
             gradient_clip_val=self.cfg.train.clip_grad,
             log_every_n_steps=max(1, int(self.cfg.general.log_every_steps)),
             enable_checkpointing=False,
+            enable_model_summary=False,
+            num_sanity_val_steps=int(self.config.get("num_sanity_val_steps", 0)),
         )
         # Lightning uses singular `check_val_every_n_epoch`; use a guarded call so
         # the wrapper remains usable across minor Lightning versions.
         try:
             return Trainer(check_val_every_n_epoch=int(self.cfg.general.check_val_every_n_epochs), **kwargs)
         except TypeError:
-            return Trainer(**kwargs)
+            # Older Lightning versions may not support all keyword arguments.
+            kwargs.pop("enable_model_summary", None)
+            kwargs.pop("num_sanity_val_steps", None)
+            try:
+                return Trainer(check_val_every_n_epoch=int(self.cfg.general.check_val_every_n_epochs), **kwargs)
+            except TypeError:
+                return Trainer(**kwargs)
+
+    def _patch_model_runtime_methods(self, model: torch.nn.Module) -> None:
+        """Reduce noisy upstream logging and keep CUDA training paths benchmark-friendly."""
+        if not self.suppress_epoch_cuda_memory_summary:
+            return
+        if getattr(model, "_empirical_comparison_runtime_methods_patched", False):
+            return
+
+        def compact_on_train_epoch_end(model_self):
+            to_log = model_self.train_loss.log_epoch_metrics()
+            elapsed = 0.0 if model_self.start_epoch_time is None else time.time() - model_self.start_epoch_time
+            model_self.print(
+                f"Epoch {model_self.current_epoch}: X_CE: {to_log['train_epoch/x_CE'] :.3f}"
+                f" -- E_CE: {to_log['train_epoch/E_CE'] :.3f} --"
+                f" y_CE: {to_log['train_epoch/y_CE'] :.3f}"
+                f" -- {elapsed:.1f}s "
+            )
+            epoch_at_metrics, epoch_bond_metrics = model_self.train_metrics.log_epoch_metrics()
+            model_self.print(f"Epoch {model_self.current_epoch}: {epoch_at_metrics} -- {epoch_bond_metrics}")
+
+        model.on_train_epoch_end = types.MethodType(compact_on_train_epoch_end, model)
+        model._empirical_comparison_runtime_methods_patched = True
+
+    def _assert_raw_samples_finite(self, samples: Any, *, context: str) -> None:
+        for idx, sample in enumerate(samples):
+            if not isinstance(sample, (list, tuple)) or len(sample) < 2:
+                raise TypeError(f"{context}: sample[{idx}] is not a DiGress (X, E) pair: {type(sample)}")
+            atom_types, edge_types = sample[0], sample[1]
+            if isinstance(atom_types, torch.Tensor) and atom_types.numel() and not torch.isfinite(atom_types).all().item():
+                raise FloatingPointError(f"{context}: non-finite node tensor in sample[{idx}].")
+            if isinstance(edge_types, torch.Tensor) and edge_types.numel() and not torch.isfinite(edge_types).all().item():
+                raise FloatingPointError(f"{context}: non-finite edge tensor in sample[{idx}].")
+
+    def estimate_complexity(
+        self,
+        *,
+        num_graphs: int | None = None,
+        batch_size: int | None = None,
+        num_nodes: int | None = None,
+        num_train_graphs: int | None = None,
+    ) -> dict[str, Any]:
+        """Return an approximate dense-operation count for this DiGress config.
+
+        Counts are approximate multiply-add counts for the GraphTransformer, not
+        exact CUDA kernel FLOPs. They are useful for scaling comparisons across
+        batch size, node count, diffusion steps and layers.
+        """
+        cfg = self.cfg or self._default_cfg()
+        B = int(batch_size or self.config.get("batch_size", cfg.train.batch_size))
+        n = int(num_nodes or self.config.get("num_nodes", 64))
+        L = int(cfg.model.n_layers)
+        T = int(cfg.model.diffusion_steps)
+        hidden = cfg.model.hidden_dims
+        hidden_mlp = cfg.model.hidden_mlp_dims
+        dx, de, dy = int(hidden.dx), int(hidden.de), int(hidden.dy)
+        dim_ffX, dim_ffE, dim_ffy = int(hidden.dim_ffX), int(hidden.dim_ffE), int(hidden.get("dim_ffy", hidden.dim_ffy if "dim_ffy" in hidden else hidden.dim_ffX))
+        hX, hE, hy = int(hidden_mlp.X), int(hidden_mlp.E), int(hidden_mlp.y)
+        inX = int(self.dataset_infos.input_dims["X"]) if self.dataset_infos is not None else int(self.config.get("complexity_input_x_dim", 7))
+        inE = int(self.dataset_infos.input_dims["E"]) if self.dataset_infos is not None else int(self.config.get("complexity_input_e_dim", 2))
+        iny = int(self.dataset_infos.input_dims["y"]) if self.dataset_infos is not None else int(self.config.get("complexity_input_y_dim", 14))
+        outX = int(self.dataset_infos.output_dims["X"]) if self.dataset_infos is not None else 1
+        outE = int(self.dataset_infos.output_dims["E"]) if self.dataset_infos is not None else 2
+        outy = int(self.dataset_infos.output_dims["y"]) if self.dataset_infos is not None else 0
+
+        input_macs = B * n * (inX * hX + hX * dx) + B * n * n * (inE * hE + hE * de) + B * (iny * hy + hy * dy)
+        layer_macs = (
+            3 * B * n * dx * dx
+            + 3 * B * n * n * dx
+            + 3 * B * n * n * de * dx
+            + B * n * dx * dx
+            + B * n * (dx * dim_ffX + dim_ffX * dx)
+            + B * n * n * (de * dim_ffE + dim_ffE * de)
+            + B * (4 * dx * dy + 4 * de * dy + 4 * dy * dx + 3 * dy * dy + dy * dim_ffy + dim_ffy * dy)
+        )
+        output_macs = B * n * (dx * hX + hX * outX) + B * n * n * (de * hE + hE * outE) + B * (dy * hy + hy * outy)
+        forward_macs_per_batch = int(input_macs + L * layer_macs + output_macs)
+        generated = int(num_graphs or self.config.get("num_generated_graphs", 1024))
+        sample_bs = int(batch_size or self.config.get("sample_batch_size", B))
+        sample_batches = int(np.ceil(generated / max(1, sample_bs)))
+        train_graphs = int(num_train_graphs or self.config.get("complexity_num_train_graphs", 8192))
+        train_steps_per_epoch = int(np.ceil(train_graphs / max(1, B)))
+        train_steps = train_steps_per_epoch * int(cfg.train.n_epochs)
+        return {
+            "batch_size": B,
+            "num_nodes": n,
+            "layers": L,
+            "diffusion_steps": T,
+            "forward_macs_per_batch": forward_macs_per_batch,
+            "forward_flops_per_batch_approx": 2 * forward_macs_per_batch,
+            "train_steps_per_epoch": train_steps_per_epoch,
+            "train_steps": train_steps,
+            "training_flops_approx_fwd_bwd": 6 * forward_macs_per_batch * train_steps,
+            "sample_batches": sample_batches,
+            "sampling_forward_calls": sample_batches * T,
+            "sampling_flops_approx": 2 * forward_macs_per_batch * sample_batches * T,
+        }
 
     # ------------------------------------------------------------------
     # Public benchmark wrapper API
@@ -785,6 +1049,7 @@ class DiGressWrapper(BaseGenerator):
         self._clear_lightning_hparams(self.model)
         self.model.eval()
         self.model.to(self.device)
+        assert_model_tensors_finite(self.model, context="DiGress loaded model")
         self._log("load_end duration=%.3fs", time.perf_counter() - started_at)
 
     def train(self, train_graphs, val_graphs=None, test_graphs=None) -> None:
@@ -818,6 +1083,9 @@ class DiGressWrapper(BaseGenerator):
         self._log("trainer_fit_start max_epochs=%s batch_size=%s", self.cfg.train.n_epochs, self.cfg.train.batch_size)
         trainer.fit(self.model, datamodule=self.datamodule)
         self._log("trainer_fit_end global_step=%s current_epoch=%s", trainer.global_step, trainer.current_epoch)
+        if int(getattr(trainer, "global_step", 0) or 0) <= 0:
+            raise RuntimeError("DiGress training completed without any optimizer step; check dataset and batch construction.")
+        assert_model_tensors_finite(self.model, context="DiGress trained model")
 
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         trainer.save_checkpoint(str(self.checkpoint_path))
@@ -838,6 +1106,7 @@ class DiGressWrapper(BaseGenerator):
 
         self.model.eval()
         self.model.to(self.device)
+        assert_model_tensors_finite(self.model, context="DiGress model before sampling")
 
         remaining = int(num_graphs)
         batch_size = int(self.config.get("sample_batch_size", self.config.get("batch_size", self.cfg.train.batch_size)))
@@ -860,6 +1129,7 @@ class DiGressWrapper(BaseGenerator):
                     save_final=0,
                     num_nodes=None,
                 )
+                self._assert_raw_samples_finite(samples, context=f"DiGress sample batch {batch_id}")
                 before = len(out_graphs)
                 out_graphs.extend(self._samples_to_networkx(samples))
                 update_progress(progress_callback, min(len(out_graphs), num_graphs) - min(before, num_graphs))
@@ -875,6 +1145,7 @@ class DiGressWrapper(BaseGenerator):
                 batch_id += cur_bs
 
         result = out_graphs[:num_graphs]
+        assert_finite_graphs(result, context="DiGress sample output")
         self._log("sample_end returned=%d duration=%.3fs", len(result), time.perf_counter() - started_at)
         return result
 
@@ -887,6 +1158,8 @@ class DiGressWrapper(BaseGenerator):
             atom_types, edge_types = sample
             atom_types = atom_types.detach().cpu().numpy()
             edge_types = edge_types.detach().cpu().numpy()
+            if not np.isfinite(atom_types).all() or not np.isfinite(edge_types).all():
+                raise FloatingPointError("DiGress sample contained non-finite atom or edge types.")
             n = int(atom_types.shape[0])
             graph = nx.Graph()
             for i in range(n):

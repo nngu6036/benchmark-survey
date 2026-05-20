@@ -64,6 +64,7 @@ except ModuleNotFoundError:  # pragma: no cover
 try:
     from empirical_comparison.models.base import BaseGenerator
     from empirical_comparison.utils.progress import update_progress
+    from empirical_comparison.utils.numerics import assert_model_tensors_finite, assert_torch_grads_finite
 except Exception:  # pragma: no cover
     class BaseGenerator:  # type: ignore[no-redef]
         supports_training = True
@@ -594,8 +595,19 @@ class EDPGNNWrapper(BaseGenerator):
                 optimizer.zero_grad(set_to_none=True)
                 score = self.model(x=x_rep, adjs=noise_adj_b, node_flags=flags_rep)
                 loss, _ = self._loss_func(score.chunk(len(sigma_list), dim=0), grad_log_q_noise_list, sigma_list)
+                if not torch.isfinite(loss.detach()).all():
+                    LOGGER.warning("Skipping non-finite EDP-GNN training loss at epoch %d: %s", epoch + 1, float(loss.detach().cpu()))
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
                 loss.backward()
+                try:
+                    assert_torch_grads_finite(self.model, context=f"EDP-GNN epoch {epoch + 1}")
+                except FloatingPointError as exc:
+                    LOGGER.warning("Skipping EDP-GNN step with non-finite gradients: %s", exc)
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
                 optimizer.step()
+                assert_model_tensors_finite(self.model, context=f"EDP-GNN parameters after epoch {epoch + 1}")
                 train_losses.append(float(loss.detach().cpu().item()))
             scheduler.step()
 
@@ -609,7 +621,10 @@ class EDPGNNWrapper(BaseGenerator):
                     x_rep, noise_adj_b, flags_rep, grad_log_q_noise_list = gen_list_of_data(x_b, adj_b, flags_b, sigma_list)
                     score = self.model(x=x_rep, adjs=noise_adj_b, node_flags=flags_rep)
                     loss, _ = self._loss_func(score.chunk(len(sigma_list), dim=0), grad_log_q_noise_list, sigma_list)
-                    eval_losses.append(float(loss.detach().cpu().item()))
+                    if torch.isfinite(loss.detach()).all():
+                        eval_losses.append(float(loss.detach().cpu().item()))
+                    else:
+                        LOGGER.warning("Ignoring non-finite EDP-GNN evaluation loss at epoch %d", epoch + 1)
 
             if epoch % int(self.config.get("log_interval", 1)) == 0 or epoch == max_epoch - 1:
                 train_mean = float(np.mean(train_losses)) if train_losses else float("nan")

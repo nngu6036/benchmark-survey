@@ -21,6 +21,7 @@ if str(SRC) not in sys.path:
 from empirical_comparison.evaluation.data_io import load_dataset_splits
 from empirical_comparison.evaluation.run_utils import (
     make_model_config,
+    make_model_run_config,
     sample_config_path,
     sample_metadata_path,
     sample_path,
@@ -32,6 +33,7 @@ from empirical_comparison.registry import available_datasets, available_models
 from empirical_comparison.utils.compute import PeakMemoryMonitor, compute_report
 from empirical_comparison.utils.io import load_yaml, save_json, save_pickle, save_yaml, stable_hash
 from empirical_comparison.utils.logging import get_logger
+from empirical_comparison.utils.numerics import assert_finite_graphs
 from empirical_comparison.utils.seed import set_seed
 
 logger = get_logger(__name__)
@@ -217,6 +219,8 @@ def _generate_samples(
     sample_seed_offset: int,
     force: bool,
     dry_run: bool,
+    run_id: int | None = None,
+    use_run_paths: bool = False,
     show_progress: bool,
     draw_trajectory: bool,
     trajectory_graphs: int,
@@ -230,17 +234,28 @@ def _generate_samples(
 ) -> dict:
     seed = int(seed) + int(sample_seed_offset)
     set_seed(seed)
-    cfg = make_model_config(
-        base_cfg,
-        dataset=dataset,
-        model=model_name,
-        seed=seed,
-    )
+    if run_id is None and not use_run_paths:
+        cfg = make_model_config(
+            base_cfg,
+            dataset=dataset,
+            model=model_name,
+            seed=seed,
+        )
+    else:
+        cfg = make_model_run_config(
+            base_cfg,
+            dataset=dataset,
+            model=model_name,
+            run_id=run_id,
+            seed=seed,
+            use_run_paths=use_run_paths,
+        )
     cfg["num_samples"] = int(num_samples)
 
-    out = sample_path(dataset, model_name)
-    metadata_out = sample_metadata_path(dataset, model_name)
-    resolved_cfg_out = sample_config_path(dataset, model_name)
+    path_run_id = run_id if use_run_paths else None
+    out = sample_path(dataset, model_name, run_id=path_run_id)
+    metadata_out = sample_metadata_path(dataset, model_name, run_id=path_run_id)
+    resolved_cfg_out = sample_config_path(dataset, model_name, run_id=path_run_id)
     logger.info(
         "Generating samples: dataset=%s model=%s num_samples=%d seed=%d checkpoint=%s",
         dataset,
@@ -253,7 +268,7 @@ def _generate_samples(
         logger.info("Dry run: would write %s", out)
         if draw_trajectory:
             logger.info("Dry run: would draw sampling trajectory")
-        return {"dataset": dataset, "model": model_name, "seed": seed, "sample_path": str(out), "dry_run": True}
+        return {"dataset": dataset, "model": model_name, "seed": seed, "run_id": run_id, "sample_path": str(out), "dry_run": True}
     if out.exists() and not force:
         raise FileExistsError(f"Sample file already exists: {out}. Use --force to overwrite.")
 
@@ -265,8 +280,9 @@ def _generate_samples(
             num_samples,
             seed=seed,
             show_progress=show_progress,
-            progress_desc=f"Sampling {dataset}/{model_name}",
+            progress_desc=f"Sampling {dataset}/{model_name}" + (f"/run_{run_id:03d}" if run_id is not None else ""),
         )
+        assert_finite_graphs(graphs, context=f"sampling {dataset}/{model_name} seed={seed}")
     elapsed = time.perf_counter() - start
     compute = compute_report(
         operation="sampling",
@@ -288,6 +304,7 @@ def _generate_samples(
         overwrite = bool(attr_schema.get("overwrite_generated_attributes", False))
         if overwrite or not before_cov.get("has_any_attributes", False):
             graphs = apply_empirical_attributes(graphs, attr_stats, seed=seed, overwrite=overwrite)
+            assert_finite_graphs(graphs, context=f"attribute postprocessing {dataset}/{model_name} seed={seed}")
             attr_postprocess_applied = True
     quality = quality_metrics(graphs, reference_graphs=ref_graphs, dataset=dataset)
     trajectory_metadata = None
@@ -315,6 +332,7 @@ def _generate_samples(
         "dataset": dataset,
         "model": model_name,
         "seed": seed,
+        "run_id": run_id,
         "num_samples_requested": num_samples,
         "num_samples_saved": len(graphs),
         "runtime_seconds": elapsed,
@@ -363,6 +381,8 @@ def main() -> None:
     parser.add_argument("--num-samples", type=int, default=128)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--sample-seed-offset", type=int, default=17, help="Offset added to the training seed for sampling.")
+    parser.add_argument("--run-id", type=int, default=None, help="Optional repeated-run id. Enables run-specific checkpoint/sample paths when supplied.")
+    parser.add_argument("--use-run-paths", action="store_true", help="Use run-specific checkpoint/sample paths even for run 0.")
     parser.add_argument("--model-config", type=str, default=None)
     parser.add_argument("--dataset-root", type=str, default="outputs/datasets")
     parser.add_argument("--force", action="store_true")
@@ -392,6 +412,8 @@ def main() -> None:
         sample_seed_offset=args.sample_seed_offset,
         force=args.force,
         dry_run=args.dry_run,
+        run_id=args.run_id,
+        use_run_paths=bool(args.use_run_paths or args.run_id is not None),
         show_progress=not args.no_progress,
         draw_trajectory=args.draw_trajectory,
         trajectory_graphs=args.trajectory_graphs,

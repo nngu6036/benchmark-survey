@@ -1,0 +1,15 @@
+reference_split: test
+metric_family: molecular_descriptor_based
+num_reference_graphs: 1024
+num_generated_graphs: 1024
+bootstrap_rounds: 20
+skip_orbit: true
+include_generic_descriptor_mmd: true
+include_atom_bond_mmd: true
+include_rdkit_validity: true
+quality_metrics:
+  - validity_rate
+  - uniqueness_rate
+  - novelty_rate
+  - valid_unique_novel_rate
+note: Validity is RDKit sanitization when RDKit is installed, otherwise a conservative valence fallback is used. Uniqueness and novelty are computed on canonical SMILES of valid generated molecules; novelty compares against the training split.

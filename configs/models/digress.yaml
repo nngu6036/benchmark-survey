@@ -26,12 +26,20 @@ batch_size: 32
 sample_batch_size: 32
 num_epochs: 100
 learning_rate: 0.0002
-num_workers: 0
-gpus: 0
+num_workers: 4
+gpus: 1
+
+
+# Fail-fast numerical safety checks for Lightning training/sampling.
+finite_guard: true
+finite_guard_check_every_n_steps: 50
+suppress_epoch_cuda_memory_summary: true
+num_sanity_val_steps: 0
+lightning_progress_bar: false
 
 # Detailed wrapper logging.
 detailed_logging: true
-log_train_every_n_steps: 1
+log_train_every_n_steps: 50
 log_sample_every_n_batches: 1
 
 # DiGress samples using all model.diffusion_steps. `sampling.num_steps` is kept

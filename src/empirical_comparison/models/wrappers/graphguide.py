@@ -17,6 +17,7 @@ import torch
 
 from empirical_comparison.models.base import BaseGenerator
 from empirical_comparison.utils.progress import update_progress
+from empirical_comparison.utils.numerics import assert_model_tensors_finite, assert_torch_grads_finite
 
 
 class GraphGUIDEWrapper(BaseGenerator):
@@ -383,9 +384,20 @@ class GraphGUIDEWrapper(BaseGenerator):
                 if is_train:
                     optimizer.zero_grad(set_to_none=True)
                     loss.backward()
+                    try:
+                        assert_torch_grads_finite(self.model, context=f"GraphGUIDE {self.dataset} training")
+                    except FloatingPointError as exc:
+                        print(f"[GraphGUIDE:{self.dataset}] skipping non-finite gradients: {exc}", flush=True)
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
                     if self.clip_grad is not None and self.clip_grad > 0:
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad)
+                        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad, error_if_nonfinite=False)
+                        if torch.is_tensor(grad_norm) and not torch.isfinite(grad_norm).all():
+                            print(f"[GraphGUIDE:{self.dataset}] skipping non-finite clipped gradient norm", flush=True)
+                            optimizer.zero_grad(set_to_none=True)
+                            continue
                     optimizer.step()
+                    assert_model_tensors_finite(self.model, context=f"GraphGUIDE {self.dataset} parameters")
                 losses.append(float(loss.detach().cpu().item()))
         return float(np.mean(losses)) if losses else float("nan")
 

@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from empirical_comparison.registry import get_model_class
 from empirical_comparison.utils.progress import progress_bar, update_progress
+from empirical_comparison.utils.numerics import assert_finite_graphs
 
 
 def sample_graphs(
@@ -43,6 +44,7 @@ def sample_graphs(
                 raise
             graphs = model.sample(num_graphs=num_graphs, seed=seed)
         update_progress(progress_callback, min(len(graphs), int(num_graphs)) - completed)
+    assert_finite_graphs(graphs, context=f"{model_name}.sample output")
     elapsed = time.perf_counter() - start
     return graphs
 

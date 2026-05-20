@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
 from empirical_comparison.evaluation.data_io import load_dataset_splits
 from empirical_comparison.evaluation.run_utils import (
     make_model_config,
+    make_model_run_config,
     run_output_dir,
 )
 from empirical_comparison.graphs.attributes import attribute_coverage, canonicalize_graph_attributes, fit_attribute_statistics, normalize_schema
@@ -20,6 +21,7 @@ from empirical_comparison.registry import get_model_class, available_datasets, a
 from empirical_comparison.utils.compute import PeakMemoryMonitor, compute_report
 from empirical_comparison.utils.io import load_yaml, save_json, save_yaml, stable_hash
 from empirical_comparison.utils.logging import get_logger
+from empirical_comparison.utils.numerics import assert_model_tensors_finite
 from empirical_comparison.utils.seed import set_seed
 
 logger = get_logger(__name__)
@@ -36,14 +38,26 @@ def _train_one_run(
     seed: int,
     force_data: bool,
     dry_run: bool,
+    run_id: int | None = None,
+    use_run_paths: bool = False,
 ) -> dict:
     set_seed(seed)
-    model_cfg = make_model_config(
-        base_model_cfg,
-        dataset=dataset,
-        model=model_name,
-        seed=seed,
-    )
+    if run_id is None and not use_run_paths:
+        model_cfg = make_model_config(
+            base_model_cfg,
+            dataset=dataset,
+            model=model_name,
+            seed=seed,
+        )
+    else:
+        model_cfg = make_model_run_config(
+            base_model_cfg,
+            dataset=dataset,
+            model=model_name,
+            run_id=run_id,
+            seed=seed,
+            use_run_paths=use_run_paths,
+        )
 
     logger.info(
         "Training model=%s dataset=%s seed=%s checkpoint=%s",
@@ -57,6 +71,7 @@ def _train_one_run(
             "dataset": dataset,
             "model": model_name,
             "seed": seed,
+            "run_id": run_id,
             "checkpoint_path": model_cfg.get("checkpoint_path"),
             "dry_run": True,
         }
@@ -89,6 +104,7 @@ def _train_one_run(
     start = time.perf_counter()
     with PeakMemoryMonitor() as memory_monitor:
         model.train(splits["train"], splits.get("val"), splits.get("test"))
+        assert_model_tensors_finite(model, context=f"training {dataset}/{model_name} seed={seed}")
     elapsed = time.perf_counter() - start
     compute = compute_report(
         operation="training",
@@ -97,13 +113,14 @@ def _train_one_run(
         memory=memory_monitor.to_dict(),
     )
 
-    run_dir = run_output_dir(dataset, model_name)
+    run_dir = run_output_dir(dataset, model_name, run_id=run_id if use_run_paths else None)
     run_dir.mkdir(parents=True, exist_ok=True)
     save_yaml(model_cfg, run_dir / "resolved_model_config.yaml", force=True)
     metadata = {
         "dataset": dataset,
         "model": model_name,
         "seed": seed,
+        "run_id": run_id,
         "runtime_seconds": elapsed,
         "training_time_seconds": elapsed,
         "training_time_minutes": elapsed / 60.0,
@@ -145,6 +162,8 @@ def main() -> None:
     parser.add_argument("--dataset-config", type=str, default=None)
     parser.add_argument("--dataset-root", type=str, default="outputs/datasets")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--run-id", type=int, default=None, help="Optional repeated-run id. Enables run-specific checkpoints/metadata when supplied.")
+    parser.add_argument("--use-run-paths", action="store_true", help="Use run-specific checkpoint/output paths even for run 0.")
     parser.add_argument("--force-data", action="store_true", help="Rebuild persisted dataset splits before training.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -166,6 +185,8 @@ def main() -> None:
         seed=args.seed,
         force_data=args.force_data,
         dry_run=args.dry_run,
+        run_id=args.run_id,
+        use_run_paths=bool(args.use_run_paths or args.run_id is not None),
     )
 
 

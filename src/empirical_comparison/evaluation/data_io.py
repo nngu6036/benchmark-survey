@@ -97,4 +97,6 @@ def load_dataset_splits(
     cfg = load_yaml(cfg_path)
     splits = build_dataset_splits(dataset, cfg)
     save_dataset_splits(dataset, splits, cfg, output_root=output_root, force=True)
-    return splits
+    # Return the canonicalized persisted splits, not the raw builder output.
+    # This keeps force=True consistent with the non-force load path.
+    return {s: load_pickle(split_path(dataset, s, output_root)) for s in ("train", "val", "test")}

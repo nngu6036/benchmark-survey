@@ -20,6 +20,7 @@ import torch.nn.functional as F
 
 from empirical_comparison.models.base import BaseGenerator
 from empirical_comparison.utils.progress import update_progress
+from empirical_comparison.utils.numerics import assert_model_tensors_finite, assert_torch_grads_finite
 
 
 @dataclass
@@ -815,13 +816,30 @@ class DisCoWrapper(BaseGenerator):
                     loss_X = torch.tensor(0.0, device=self.device)
                 loss = loss_X + edge_loss_weight * loss_E
 
+                if not torch.isfinite(loss.detach()).all():
+                    print(f"[DisCo:{self.dataset}] skipping non-finite loss: {float(loss.detach().cpu())}", flush=True)
+                    if train:
+                        self.optimizer.zero_grad(set_to_none=True)
+                    continue
+
                 if train:
-                    self.optimizer.zero_grad()
+                    self.optimizer.zero_grad(set_to_none=True)
                     loss.backward()
+                    try:
+                        assert_torch_grads_finite(self.model, context=f"DisCo {self.dataset} training")
+                    except FloatingPointError as exc:
+                        print(f"[DisCo:{self.dataset}] skipping non-finite gradients: {exc}", flush=True)
+                        self.optimizer.zero_grad(set_to_none=True)
+                        continue
                     clip_value = self.config.get("gradient_clip_value")
                     if clip_value is not None:
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), float(clip_value))
+                        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), float(clip_value), error_if_nonfinite=False)
+                        if torch.is_tensor(grad_norm) and not torch.isfinite(grad_norm).all():
+                            print(f"[DisCo:{self.dataset}] skipping non-finite clipped gradient norm", flush=True)
+                            self.optimizer.zero_grad(set_to_none=True)
+                            continue
                     self.optimizer.step()
+                    assert_model_tensors_finite(self.model, context=f"DisCo {self.dataset} parameters")
 
                 with torch.no_grad():
                     E_mask = node_mask.unsqueeze(-1) * node_mask.unsqueeze(-2)

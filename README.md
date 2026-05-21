@@ -96,6 +96,29 @@ PYTHONPATH=src python scripts/generate_samples.py \
   --force
 ```
 
+```bash
+for run_id in {0..4}; do
+  seed=$((42 + run_id))
+
+  PYTHONPATH=src python scripts/train_model.py \
+    --dataset sbm \
+    --model digress \
+    --seed "$seed" \
+    --run-id "$run_id" \
+    --use-run-paths
+
+  PYTHONPATH=src python scripts/generate_samples.py \
+    --dataset sbm \
+    --model digress \
+    --num-samples 1024 \
+    --seed "$seed" \
+    --run-id "$run_id" \
+    --use-run-paths \
+    --force
+done
+```
+
+
 Run-aware outputs are stored as `outputs/checkpoints/<dataset>/<model>/run_000/...`, `outputs/samples/<dataset>/<model>/run_000.pkl`, and `outputs/metrics/<dataset>/<model>/run_000/*.json`.
 
 Attributed molecular example:
@@ -170,11 +193,14 @@ Molecular descriptor metrics for QM9/ZINC:
 PYTHONPATH=src python scripts/evaluate_molecular_descriptor_metrics.py \
   --dataset qm9 \
   --model disco \
+  --run-id 0 \
   --reference-split test \
   --max-reference-graphs 1024 \
   --max-generated-graphs 1024 \
   --skip-orbit
 ```
+
+Pass `--run-id N` to evaluate run-specific samples such as `outputs/samples/<dataset>/<model>/run_000.pkl`; molecular descriptor metrics are then written under `outputs/metrics/<dataset>/<model>/run_000/`.
 
 The generic descriptor script reports degree MMD, clustering MMD, spectral MMD, structural-summary MMD, optional orbit MMD, and `attribute_mmd` when attributes are present. The molecular descriptor script reports those generic descriptors plus `atom_type_mmd`, `bond_type_mmd`, RDKit sanitization validity, uniqueness, novelty, and `valid_unique_novel_rate`. Uniqueness and novelty are computed on canonical RDKit SMILES of valid generated molecules; novelty compares against the training split.
 
@@ -218,6 +244,7 @@ for dataset in "${datasets[@]}"; do
       PYTHONPATH=src python scripts/evaluate_molecular_descriptor_metrics.py \
         --dataset "$dataset" \
         --model "$model" \
+        --run-id 0 \
         --max-reference-graphs 1024 \
         --max-generated-graphs 1024 \
         --skip-orbit

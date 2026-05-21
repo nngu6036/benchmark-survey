@@ -391,14 +391,14 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
     return payload
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate molecular graph descriptor and RDKit validity metrics.")
     parser.add_argument("--model", required=True, choices=available_models())
     parser.add_argument("--dataset", required=True, choices=available_datasets())
     parser.add_argument("--dataset-root", type=str, default="outputs/datasets")
     parser.add_argument("--reference-split", choices=["train", "val", "test"], default="test")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--run-id", type=int, default=None)
+    parser.add_argument("--run-id", type=int, default=None, help="Optional repeated-run id used to load run-specific samples and write run-specific metrics.")
     parser.add_argument("--max-graphs", type=int, default=None, help="Backward-compatible cap applied to both reference and generated graphs unless side-specific caps are supplied.")
     parser.add_argument("--max-reference-graphs", type=int, default=None)
     parser.add_argument("--max-generated-graphs", type=int, default=None)
@@ -419,6 +419,11 @@ def main() -> None:
     parser.add_argument("--edge-feature-attr", type=str, default="edge_attr")
     parser.add_argument("--graph-label-attr", type=str, default="graph_label")
     parser.add_argument("--output", type=str, default=None)
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
 
     output_path = Path(args.output) if args.output else None

@@ -52,3 +52,21 @@ def test_torchvision_onnx_cast_long_compat_patch(monkeypatch):
     args, kwargs = symbolic_opset9._cast_Long(graph, "value")
     assert args == ("Cast", "value")
     assert kwargs == {"to_i": 7}
+
+
+def test_legacy_torch_load_retries_without_weights_only_for_old_torch(monkeypatch):
+    calls = []
+
+    def old_torch_load(*args, **kwargs):
+        calls.append(kwargs.copy())
+        if "weights_only" in kwargs:
+            raise TypeError("_Unpickler.__init__() got an unexpected keyword argument 'weights_only'")
+        return "loaded"
+
+    monkeypatch.setattr(torch, "load", old_torch_load)
+    wrapper = object.__new__(DiGressWrapper)
+
+    with wrapper._legacy_torch_load():
+        assert torch.load("dataset.pt") == "loaded"
+
+    assert calls == [{"weights_only": False}, {}]

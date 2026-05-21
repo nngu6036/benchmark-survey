@@ -957,7 +957,11 @@ class DiGressWrapper(BaseGenerator):
 
         def compat_load(*args, **kwargs):
             kwargs.setdefault("weights_only", False)
-            return original_load(*args, **kwargs)
+            try:
+                return original_load(*args, **kwargs)
+            except TypeError:
+                kwargs.pop("weights_only", None)
+                return original_load(*args, **kwargs)
 
         torch.load = compat_load
         try:

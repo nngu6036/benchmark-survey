@@ -16,6 +16,7 @@ if str(SRC) not in sys.path:
 
 from empirical_comparison.evaluation.data_io import load_dataset_splits
 from empirical_comparison.evaluation.run_utils import (
+    evaluate_repeated_runs,
     existing_sample_path,
     metric_path,
 )
@@ -252,6 +253,7 @@ def main() -> None:
     parser.add_argument("--no-wl-idf", action="store_true", help="Disable reference-fitted IDF weights for WL subtree features.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--run-id", type=int, default=None)
+    parser.add_argument("--run-ids", type=int, nargs="+", default=None, help="Evaluate multiple run-specific sample files and write an aggregate metric JSON with across-run means.")
     parser.add_argument("--max-graphs", type=int, default=None, help="Backward-compatible cap applied to both reference and generated graphs unless side-specific caps are supplied.")
     parser.add_argument("--max-reference-graphs", type=int, default=None)
     parser.add_argument("--max-generated-graphs", type=int, default=None)
@@ -261,7 +263,7 @@ def main() -> None:
     args = parser.parse_args()
 
     output_path = Path(args.output) if args.output else None
-    _evaluate(args, seed=args.seed, output_path=output_path)
+    evaluate_repeated_runs(args, metric_filename=METRIC_FILENAME, evaluate_fn=_evaluate, base_seed=args.seed, output_path=output_path)
 
 
 if __name__ == "__main__":

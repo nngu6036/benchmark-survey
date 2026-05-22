@@ -22,6 +22,7 @@ from empirical_comparison.models.base import BaseGenerator
 from empirical_comparison.utils.logging import get_logger
 from empirical_comparison.utils.numerics import assert_finite_graphs, assert_model_tensors_finite
 from empirical_comparison.utils.progress import update_progress
+from empirical_comparison.utils.torch_compat import torch_load_compat
 
 
 LOGGER = get_logger(__name__)
@@ -1102,7 +1103,7 @@ class ConStructWrapper(BaseGenerator):
             raise FileNotFoundError(
                 f"ConStruct checkpoint not found: {self.checkpoint_path}. Train the model first or set checkpoint_path."
             )
-        ckpt = torch.load(self.checkpoint_path, map_location=self.device, weights_only=False)
+        ckpt = torch_load_compat(self.checkpoint_path, map_location=self.device, weights_only=False)
         self.cfg_dict = ckpt.get("cfg", self.cfg_dict)
         self.cfg = _to_config_node(self.cfg_dict)
         meta = _ConStructDatasetMeta(**ckpt["meta"])

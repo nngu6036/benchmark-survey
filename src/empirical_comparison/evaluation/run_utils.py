@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import re
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 
 def parse_run_ids(
@@ -247,6 +247,63 @@ def aggregate_numeric_results(run_payloads: Sequence[dict[str, Any]]) -> dict[st
         summary[f"{key}_std"] = std
         nested[key] = {"mean": mean, "std": std, "num_runs": int(arr.size)}
     return {"flat": summary, "nested": nested}
+
+
+def evaluate_repeated_runs(
+    args: Any,
+    *,
+    metric_filename: str,
+    evaluate_fn: Callable[..., dict[str, Any]],
+    base_seed: int,
+    output_path: Path | None = None,
+) -> dict[str, Any]:
+    """Evaluate explicit run ids and save an aggregate payload.
+
+    Each run is evaluated using the normal run-specific metric path.  The
+    aggregate payload keeps bare result keys as across-run means, so downstream
+    tables that expect single-run metric names continue to work.
+    """
+    run_ids = parse_run_ids(run_id=getattr(args, "run_id", None), run_ids=getattr(args, "run_ids", None))
+    if len(run_ids) == 1 and not getattr(args, "run_ids", None):
+        return evaluate_fn(args, seed=base_seed, output_path=output_path)
+
+    from empirical_comparison.utils.io import save_json
+
+    run_payloads: list[dict[str, Any]] = []
+    for run_id in run_ids:
+        run_args = copy.copy(args)
+        run_args.run_id = int(run_id)
+        run_args.run_ids = None
+        run_payloads.append(evaluate_fn(run_args, seed=run_seed(base_seed, int(run_id)), output_path=None))
+
+    numeric = aggregate_numeric_results(run_payloads)
+    first = run_payloads[0]
+    total_runtime = sum(float(p.get("runtime_seconds", 0.0) or 0.0) for p in run_payloads)
+    payload = {
+        "dataset": first.get("dataset", getattr(args, "dataset", None)),
+        "model": first.get("model", getattr(args, "model", None)),
+        "metric_family": first.get("metric_family"),
+        "runtime_seconds": total_runtime,
+        "is_aggregate": True,
+        "run_ids": run_ids,
+        "num_runs": len(run_ids),
+        "protocol": {
+            "base_seed": base_seed,
+            "run_ids": run_ids,
+            "seed_stride": 1000,
+            "aggregation": "numeric results are averaged across run_ids; *_std values are population standard deviations across run_ids",
+            "source_metric_files": [
+                str(metric_path(str(first.get("dataset", getattr(args, "dataset"))), str(first.get("model", getattr(args, "model"))), metric_filename, run_id=rid))
+                for rid in run_ids
+            ],
+        },
+        "results": numeric["flat"],
+        "run_result_summary": numeric["nested"],
+    }
+    if output_path is None:
+        output_path = aggregate_metric_path(str(payload["dataset"]), str(payload["model"]), metric_filename)
+    save_json(payload, output_path)
+    return payload
 
 
 def explicit_run_selection(run_id: int | None, run_ids: Sequence[int] | None) -> bool:

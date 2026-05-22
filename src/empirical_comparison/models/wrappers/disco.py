@@ -21,6 +21,7 @@ import torch.nn.functional as F
 from empirical_comparison.models.base import BaseGenerator
 from empirical_comparison.utils.progress import update_progress
 from empirical_comparison.utils.numerics import assert_finite_graphs, assert_model_tensors_finite, assert_torch_grads_finite
+from empirical_comparison.utils.torch_compat import torch_load_compat
 
 
 @dataclass
@@ -939,10 +940,7 @@ class DisCoWrapper(BaseGenerator):
             raise FileNotFoundError(
                 f"DisCo checkpoint not found: {self.checkpoint_path}. Run scripts/train_model.py first or set checkpoint_path."
             )
-        try:
-            ckpt = torch.load(self.checkpoint_path, map_location=self.device, weights_only=False)
-        except TypeError:  # PyTorch < 2.6
-            ckpt = torch.load(self.checkpoint_path, map_location=self.device)
+        ckpt = torch_load_compat(self.checkpoint_path, map_location=self.device, weights_only=False)
         meta_raw = ckpt.get("metadata")
         if not meta_raw:
             raise ValueError(f"Checkpoint {self.checkpoint_path} does not contain DisCo metadata.")

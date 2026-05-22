@@ -80,15 +80,15 @@ Run-aware synthetic repetition example:
 
 ```bash
 PYTHONPATH=src python scripts/train_model.py \
-  --dataset sbm \
-  --model dummy \
+  --dataset planar \
+  --model digress \
   --seed 42 \
   --run-id 0 \
   --use-run-paths
 
 PYTHONPATH=src python scripts/generate_samples.py \
-  --dataset sbm \
-  --model dummy \
+  --dataset planar \
+  --model digress \
   --num-samples 1024 \
   --seed 42 \
   --run-id 0 \
@@ -101,14 +101,14 @@ for run_id in {0..4}; do
   seed=$((42 + run_id))
 
   PYTHONPATH=src python scripts/train_model.py \
-    --dataset sbm \
+    --dataset planar \
     --model digress \
     --seed "$seed" \
     --run-id "$run_id" \
     --use-run-paths
 
   PYTHONPATH=src python scripts/generate_samples.py \
-    --dataset sbm \
+    --dataset planar \
     --model digress \
     --num-samples 1024 \
     --seed "$seed" \
@@ -126,16 +126,57 @@ Attributed molecular example:
 ```bash
 PYTHONPATH=src python scripts/train_model.py \
   --dataset qm9 \
-  --model disco
+  --model dummy \
+  --seed 42 \
+  --run-id 0 \
+  --use-run-paths
 
 PYTHONPATH=src python scripts/generate_samples.py \
   --dataset qm9 \
-  --model disco \
+  --model dummy \
   --num-samples 1024 \
-  --draw-trajectory \
-  --trajectory-graphs 2 \
-  --trajectory-steps 8 \
+  --seed 42 \
+  --run-id 0 \
+  --use-run-paths \
   --force
+```
+
+```bash
+for run_id in {0..2}; do
+  seed=$((42 + run_id))
+
+  PYTHONPATH=src python scripts/train_model.py \
+    --dataset zinc \
+    --model grum \
+    --seed "$seed" \
+    --run-id "$run_id" \
+    --use-run-paths
+
+  PYTHONPATH=src python scripts/generate_samples.py \
+    --dataset zinc \
+    --model grum \
+    --num-samples 1024 \
+    --seed "$seed" \
+    --run-id "$run_id" \
+    --use-run-paths \
+    --force
+
+  PYTHONPATH=src python scripts/train_model.py \
+    --dataset qm9 \
+    --model grum \
+    --seed "$seed" \
+    --run-id "$run_id" \
+    --use-run-paths
+
+  PYTHONPATH=src python scripts/generate_samples.py \
+    --dataset qm9 \
+    --model grum \
+    --num-samples 1024 \
+    --seed "$seed" \
+    --run-id "$run_id" \
+    --use-run-paths \
+    --force
+done
 ```
 
 `generate_samples.py` now displays a graph-level progress bar by default. Add `--no-progress` to disable it in non-interactive runs. `--draw-trajectory` saves a reference-to-sample visualization under `outputs/figures/trajectories/<dataset>/<model>_trajectory.png`.
@@ -200,7 +241,7 @@ PYTHONPATH=src python scripts/evaluate_molecular_descriptor_metrics.py \
   --skip-orbit
 ```
 
-Pass `--run-id N` to evaluate run-specific samples such as `outputs/samples/<dataset>/<model>/run_000.pkl`; molecular descriptor metrics are then written under `outputs/metrics/<dataset>/<model>/run_000/`.
+Pass `--run-id N` to evaluate one run-specific sample such as `outputs/samples/<dataset>/<model>/run_000.pkl`; metric files are written under `outputs/metrics/<dataset>/<model>/run_000/`. Pass `--run-ids 0 1 2` to evaluate several run-specific sample files and write an aggregate JSON such as `outputs/metrics/<dataset>/<model>/descriptor_metrics.aggregate.json`; bare metric keys contain the across-run mean and `<metric>_std` keys contain the across-run population standard deviation.
 
 The generic descriptor script reports degree MMD, clustering MMD, spectral MMD, structural-summary MMD, optional orbit MMD, and `attribute_mmd` when attributes are present. The molecular descriptor script reports those generic descriptors plus `atom_type_mmd`, `bond_type_mmd`, RDKit sanitization validity, uniqueness, novelty, and `valid_unique_novel_rate`. Uniqueness and novelty are computed on canonical RDKit SMILES of valid generated molecules; novelty compares against the training split.
 
@@ -236,7 +277,7 @@ Loop over all datasets and all models:
 
 ```bash
 datasets=(sbm planar qm9 zinc)
-models=(dummy construct digress disco edp_gnn graphguide grum)
+models=(construct digress disco edp_gnn graphguide grum)
 
 for dataset in "${datasets[@]}"; do
   for model in "${models[@]}"; do
@@ -244,7 +285,7 @@ for dataset in "${datasets[@]}"; do
       PYTHONPATH=src python scripts/evaluate_molecular_descriptor_metrics.py \
         --dataset "$dataset" \
         --model "$model" \
-        --run-id 0 \
+        --run-ids 0 1 2 \
         --max-reference-graphs 1024 \
         --max-generated-graphs 1024 \
         --skip-orbit
@@ -252,6 +293,7 @@ for dataset in "${datasets[@]}"; do
       PYTHONPATH=src python scripts/evaluate_descriptor_metrics.py \
         --dataset "$dataset" \
         --model "$model" \
+        --run-ids 0 1 2 3 4\
         --max-reference-graphs 1024 \
         --max-generated-graphs 1024 \
         --skip-orbit
@@ -260,6 +302,7 @@ for dataset in "${datasets[@]}"; do
     PYTHONPATH=src python scripts/evaluate_classifier_metrics.py \
       --dataset "$dataset" \
       --model "$model" \
+      --run-ids 0 1 2 3 4\
       --max-reference-graphs 1024 \
       --max-generated-graphs 1024 \
       --num-splits 5 \
@@ -270,6 +313,7 @@ for dataset in "${datasets[@]}"; do
     PYTHONPATH=src python scripts/evaluate_learned_feature_metrics.py \
       --dataset "$dataset" \
       --model "$model" \
+      --run-ids 0 1 2 3 4\
       --reference-split train \
       --encoder wl_subtree \
       --max-reference-graphs 1024 \

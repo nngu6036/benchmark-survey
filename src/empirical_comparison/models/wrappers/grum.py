@@ -20,6 +20,7 @@ import yaml
 
 from empirical_comparison.utils.progress import update_progress
 from empirical_comparison.utils.numerics import assert_finite_graphs, assert_model_tensors_finite, assert_torch_grads_finite
+from empirical_comparison.utils.torch_compat import torch_load_compat
 from torch.utils.data import DataLoader, TensorDataset
 
 
@@ -268,7 +269,7 @@ class GruMWrapper:
             )
         mods = self._import_modules()
         _ensure_easydict_fallback()
-        ckpt = torch.load(self.checkpoint_path, map_location="cpu", weights_only=False)
+        ckpt = torch_load_compat(self.checkpoint_path, map_location="cpu", weights_only=False)
 
         if "benchmark_wrapper" in ckpt:
             config = _to_edict(ckpt["config"])

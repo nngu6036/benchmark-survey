@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
 
 from empirical_comparison.evaluation.data_io import load_dataset_splits
 from empirical_comparison.evaluation.run_utils import (
+    evaluate_repeated_runs,
     existing_sample_path,
     metric_path,
 )
@@ -287,6 +288,7 @@ def main() -> None:
     parser.add_argument("--max-reference-graphs", type=int, default=None)
     parser.add_argument("--max-generated-graphs", type=int, default=None)
     parser.add_argument("--run-id", type=int, default=None, help="Evaluate samples stored under a run-specific path, e.g. outputs/runs/<dataset>/<model>/run_00.")
+    parser.add_argument("--run-ids", type=int, nargs="+", default=None, help="Evaluate multiple run-specific sample files and write an aggregate metric JSON with across-run means.")
     parser.add_argument("--num-splits", type=int, default=3, help="Repeated PGS fit/test partitions for the sampled graph set.")
     parser.add_argument("--descriptors", nargs="+", default=None, help="Descriptors: degree clustering spectral orbit4 orbit5 gin attributes concat")
     parser.add_argument("--skip-orbit", action="store_true", help="Backward-compatible alias for --skip-orbits.")
@@ -311,7 +313,7 @@ def main() -> None:
     args = parser.parse_args()
 
     output_path = Path(args.output) if args.output else None
-    _evaluate(args, seed=args.seed, output_path=output_path)
+    evaluate_repeated_runs(args, metric_filename=METRIC_FILENAME, evaluate_fn=_evaluate, base_seed=args.seed, output_path=output_path)
 
 
 if __name__ == "__main__":

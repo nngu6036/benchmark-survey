@@ -18,6 +18,7 @@ import torch
 from empirical_comparison.models.base import BaseGenerator
 from empirical_comparison.utils.progress import update_progress
 from empirical_comparison.utils.numerics import assert_model_tensors_finite, assert_torch_grads_finite
+from empirical_comparison.utils.torch_compat import torch_load_compat
 
 
 class GraphGUIDEWrapper(BaseGenerator):
@@ -527,7 +528,7 @@ class GraphGUIDEWrapper(BaseGenerator):
                 "Run scripts/train_model.py first or set checkpoint_path."
             )
         with self._legacy_torch_load():
-            ckpt = torch.load(self.checkpoint_path, map_location=self.device, weights_only=False)
+            ckpt = torch_load_compat(self.checkpoint_path, map_location=self.device, weights_only=False)
 
         wrapper_cfg = ckpt.get("wrapper_config") if isinstance(ckpt, dict) else None
         if isinstance(wrapper_cfg, dict):
@@ -567,7 +568,11 @@ class GraphGUIDEWrapper(BaseGenerator):
 
         def compat_load(*args, **kwargs):
             kwargs.setdefault("weights_only", False)
-            return original_load(*args, **kwargs)
+            try:
+                return original_load(*args, **kwargs)
+            except TypeError:
+                kwargs.pop("weights_only", None)
+                return original_load(*args, **kwargs)
 
         torch.load = compat_load
         try:

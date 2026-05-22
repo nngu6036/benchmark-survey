@@ -7,6 +7,7 @@ from empirical_comparison.models.wrappers.digress import (
     _cuda_device_is_usable,
     _patch_torchvision_onnx_compat,
 )
+from empirical_comparison.utils.torch_compat import torch_load_compat
 
 
 def test_cuda_probe_rejects_unusable_cuda(monkeypatch):
@@ -70,3 +71,18 @@ def test_legacy_torch_load_retries_without_weights_only_for_old_torch(monkeypatc
         assert torch.load("dataset.pt") == "loaded"
 
     assert calls == [{"weights_only": False}, {}]
+
+
+def test_torch_load_compat_retries_without_weights_only_for_old_torch(monkeypatch):
+    calls = []
+
+    def old_torch_load(*args, **kwargs):
+        calls.append(kwargs.copy())
+        if "weights_only" in kwargs:
+            raise TypeError("'weights_only' is an invalid keyword argument for Unpickler()")
+        return {"checkpoint": True}
+
+    monkeypatch.setattr(torch, "load", old_torch_load)
+
+    assert torch_load_compat("model.pt", map_location="cpu", weights_only=False) == {"checkpoint": True}
+    assert calls == [{"map_location": "cpu", "weights_only": False}, {"map_location": "cpu"}]

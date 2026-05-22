@@ -17,6 +17,7 @@ if str(SRC) not in sys.path:
 
 from empirical_comparison.evaluation.data_io import load_dataset_splits
 from empirical_comparison.evaluation.run_utils import (
+    evaluate_repeated_runs,
     existing_sample_path,
     metric_path,
 )
@@ -446,6 +447,7 @@ def main() -> None:
     parser.add_argument("--max-reference-graphs", type=int, default=None, help="Cap only the reference split. This is how experiment.num_reference_graphs is enforced.")
     parser.add_argument("--max-generated-graphs", type=int, default=None, help="Cap only the generated sample set for evaluation.")
     parser.add_argument("--run-id", type=int, default=None, help="Optional repeated-run id used to load run-specific samples and write run-specific metrics.")
+    parser.add_argument("--run-ids", type=int, nargs="+", default=None, help="Evaluate multiple run-specific sample files and write an aggregate metric JSON with across-run means.")
     parser.add_argument("--sigma", type=float, default=None)
     parser.add_argument("--num-bootstrap", type=int, default=0)
     parser.add_argument("--degree-bins", type=int, default=20)
@@ -466,7 +468,7 @@ def main() -> None:
     args = parser.parse_args()
 
     output_path = Path(args.output) if args.output else None
-    _evaluate(args, seed=args.seed, output_path=output_path)
+    evaluate_repeated_runs(args, metric_filename=METRIC_FILENAME, evaluate_fn=_evaluate, base_seed=args.seed, output_path=output_path)
 
 
 if __name__ == "__main__":

@@ -269,6 +269,13 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
     gen_graphs, _ = canonicalize_graph_attributes(gen_graphs, attr_schema, attr_stats)
     raw_node_values, raw_edge_values = _raw_attribute_values(args.dataset, args.dataset_root)
     explicit_raw_node_values, rdkit_mapping_source = _explicit_rdkit_node_mapping(args.dataset)
+    if args.dataset.lower() == "zinc" and not explicit_raw_node_values:
+        raise ValueError(
+            "ZINC RDKit validity requires configs/datasets/zinc.yaml:"
+            "rdkit_atomic_number_mapping. PyG ZINC atom_type values are "
+            "categorical ids, not atomic numbers. Do not report chemical "
+            "validity/uniqueness/novelty until this mapping is supplied."
+        )
     rdkit_node_values, rdkit_node_value_source = _rdkit_node_label_values(
         dataset=args.dataset,
         explicit_raw_node_values=explicit_raw_node_values,

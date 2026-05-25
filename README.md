@@ -51,9 +51,14 @@ To inspect ZINC atom-type/category values without overwriting existing prepared
 splits, use:
 
 ```bash
-PYTHONPATH=src python scripts/prepare_data.py \
-  --dataset zinc \
-  --inspect-atom-types
+PYTHONPATH=src python scripts/prepare_zinc_from_smiles.py \
+  --csv data/zinc_smiles.csv \
+  --smiles-col smiles \
+  --train-count 10000 \
+  --val-count 1000 \
+  --test-count 1000 \
+  --seed 42 \
+  --force
 ```
 
 This prints raw/canonical `atom_type` or `node_label` counts when available and

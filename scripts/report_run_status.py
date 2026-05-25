@@ -101,35 +101,73 @@ def _status_for(dataset: str, model: str, run_id: int | None) -> dict[str, Any]:
     }
 
 
-def _print_table(rows: list[dict[str, Any]]) -> None:
-    columns = [
-        "dataset",
-        "model",
-        "run_id",
-        "training_complete",
-        "num_samples",
-        "sampling_complete",
-        "training_metadata",
-        "sampling_metadata",
-    ]
-    widths = {col: max(len(col), *(len(str(row.get(col, ""))) for row in rows)) for col in columns}
-    print("  ".join(col.ljust(widths[col]) for col in columns))
-    print("  ".join("-" * widths[col] for col in columns))
+def _format_status(value: Any) -> str:
+    return "complete" if value else "missing"
+
+
+def _format_run_id(value: Any) -> str:
+    return "legacy/default" if value == "" else f"run_{int(value):03d}"
+
+
+def _print_report(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        print("No run status rows found.")
+        return
+
+    total = len(rows)
+    training_complete = sum(1 for row in rows if row.get("training_complete"))
+    sampling_complete = sum(1 for row in rows if row.get("sampling_complete"))
+    print("Run status report")
+    print(f"Rows: {total}")
+    print(f"Training complete: {training_complete}/{total}")
+    print(f"Sampling complete: {sampling_complete}/{total}")
+
+    current_group: tuple[str, str] | None = None
     for row in rows:
-        print("  ".join(str(row.get(col, "")).ljust(widths[col]) for col in columns))
+        group = (str(row["dataset"]), str(row["model"]))
+        if group != current_group:
+            current_group = group
+            print("")
+            print(f"{group[0]} / {group[1]}")
+
+        print(f"  {_format_run_id(row.get('run_id', ''))}")
+        print(f"    training: {_format_status(row.get('training_complete'))}")
+        if row.get("training_metadata"):
+            print(f"      metadata: {row['training_metadata']}")
+        if row.get("checkpoint_path"):
+            print(f"      checkpoint: {row['checkpoint_path']}")
+        if row.get("training_seconds") != "":
+            print(f"      seconds: {row['training_seconds']}")
+
+        sample_count = row.get("num_samples", "")
+        sample_text = _format_status(row.get("sampling_complete"))
+        if sample_count != "":
+            sample_text = f"{sample_text}, samples={sample_count}"
+        print(f"    sampling: {sample_text}")
+        if row.get("sampling_metadata"):
+            print(f"      metadata: {row['sampling_metadata']}")
+        if row.get("sample_path"):
+            print(f"      samples: {row['sample_path']}")
+        if row.get("sampling_seconds") != "":
+            print(f"      seconds: {row['sampling_seconds']}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Report training and sampling status for benchmark runs.")
-    parser.add_argument("--datasets", nargs="*", choices=available_datasets(), default=DEFAULT_DATASETS)
-    parser.add_argument("--models", nargs="*", choices=available_models(), default=DEFAULT_MODELS)
+    parser.add_argument("--dataset", choices=available_datasets(), default=None, help="Single dataset to check.")
+    parser.add_argument("--model", choices=available_models(), default=None, help="Single model to check.")
+    parser.add_argument("--datasets", nargs="*", choices=available_datasets(), default=None, help="Datasets to check. Defaults to all benchmark datasets.")
+    parser.add_argument("--models", nargs="*", choices=available_models(), default=None, help="Models to check. Defaults to all benchmark models.")
     parser.add_argument("--run-ids", type=int, nargs="*", default=None, help="Explicit run ids to check. By default, discover run ids from metadata/sample files.")
     parser.add_argument("--output", type=str, default=None, help="Optional CSV output path.")
     args = parser.parse_args()
 
+    datasets = [args.dataset] if args.dataset else (args.datasets if args.datasets is not None else DEFAULT_DATASETS)
+    models = [args.model] if args.model else (args.models if args.models is not None else DEFAULT_MODELS)
+
     rows: list[dict[str, Any]] = []
-    for dataset in args.datasets:
-        for model in args.models:
+    for dataset in datasets:
+        for model in models:
             run_ids = [int(x) for x in args.run_ids] if args.run_ids is not None else _discover_run_ids(dataset, model)
             if not run_ids:
                 rows.append(_status_for(dataset, model, run_id=None))
@@ -145,7 +183,7 @@ def main() -> None:
             writer.writeheader()
             writer.writerows(rows)
         logger.info("Saved run status report to %s", out)
-    _print_table(rows)
+    _print_report(rows)
 
 
 if __name__ == "__main__":

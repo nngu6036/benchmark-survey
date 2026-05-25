@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import pickle
+import sys
 from pathlib import Path
 
 
@@ -43,3 +44,20 @@ def test_report_run_status_discovers_training_and_sampling(tmp_path, monkeypatch
     assert row["num_samples"] == 3
     assert row["training_metadata"].endswith("train_metadata.json")
     assert row["sampling_metadata"].endswith("run_002.metadata.json")
+
+
+def test_report_run_status_accepts_singular_dataset_and_model(tmp_path, monkeypatch, capsys):
+    module = _load_script_module()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["report_run_status.py", "--dataset", "qm9", "--model", "grum", "--run-ids", "0"])
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert "Run status report" in out
+    assert "qm9 / grum" in out
+    assert "run_000" in out
+    assert "training: missing" in out
+    assert "qm9" in out
+    assert "grum" in out
+    assert "planar" not in out

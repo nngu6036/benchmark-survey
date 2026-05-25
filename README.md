@@ -367,6 +367,15 @@ PYTHONPATH=src python scripts/make_compute_budget_table.py \
   --models graphguide digress construct edp_gnn disco grum
 ```
 
+To inspect which run ids exist and whether training/sampling completed, run:
+
+```bash
+PYTHONPATH=src python scripts/report_run_status.py
+PYTHONPATH=src python scripts/report_run_status.py --dataset qm9 --model grum
+```
+
+With no dataset or model arguments, `report_run_status.py` checks all benchmark datasets and models. Use `--datasets` or `--models` for multi-value subsets, and `--run-ids 0 1 2` to check specific repeated runs.
+
 After metric evaluation, aggregate the JSON metric outputs and generate the benchmark LaTeX tables with:
 
 ```bash

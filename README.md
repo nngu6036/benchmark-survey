@@ -97,19 +97,35 @@ PYTHONPATH=src python scripts/generate_samples.py \
 ```
 
 ```bash
-for run_id in {0..4}; do
+for run_id in {0..2}; do
   seed=$((42 + run_id))
+
+    PYTHONPATH=src python scripts/train_model.py \
+    --dataset sbm \
+    --model construct \
+    --seed "$seed" \
+    --run-id "$run_id" \
+    --use-run-paths
+
+  PYTHONPATH=src python scripts/generate_samples.py \
+    --dataset sbm \
+    --model construct \
+    --num-samples 1024 \
+    --seed "$seed" \
+    --run-id "$run_id" \
+    --use-run-paths \
+    --force
 
   PYTHONPATH=src python scripts/train_model.py \
     --dataset planar \
-    --model digress \
+    --model construct \
     --seed "$seed" \
     --run-id "$run_id" \
     --use-run-paths
 
   PYTHONPATH=src python scripts/generate_samples.py \
     --dataset planar \
-    --model digress \
+    --model construct \
     --num-samples 1024 \
     --seed "$seed" \
     --run-id "$run_id" \
@@ -147,14 +163,14 @@ for run_id in {0..2}; do
 
   PYTHONPATH=src python scripts/train_model.py \
     --dataset zinc \
-    --model grum \
+    --model edp_gnn \
     --seed "$seed" \
     --run-id "$run_id" \
     --use-run-paths
 
   PYTHONPATH=src python scripts/generate_samples.py \
     --dataset zinc \
-    --model grum \
+    --model edp_gnn \
     --num-samples 1024 \
     --seed "$seed" \
     --run-id "$run_id" \
@@ -163,14 +179,14 @@ for run_id in {0..2}; do
 
   PYTHONPATH=src python scripts/train_model.py \
     --dataset qm9 \
-    --model grum \
+    --model edp_gnn \
     --seed "$seed" \
     --run-id "$run_id" \
     --use-run-paths
 
   PYTHONPATH=src python scripts/generate_samples.py \
     --dataset qm9 \
-    --model grum \
+    --model edp_gnn \
     --num-samples 1024 \
     --seed "$seed" \
     --run-id "$run_id" \
@@ -293,7 +309,7 @@ for dataset in "${datasets[@]}"; do
       PYTHONPATH=src python scripts/evaluate_descriptor_metrics.py \
         --dataset "$dataset" \
         --model "$model" \
-        --run-ids 0 1 2 3 4\
+        --run-ids 0 1 2\
         --max-reference-graphs 1024 \
         --max-generated-graphs 1024 \
         --skip-orbit
@@ -302,7 +318,7 @@ for dataset in "${datasets[@]}"; do
     PYTHONPATH=src python scripts/evaluate_classifier_metrics.py \
       --dataset "$dataset" \
       --model "$model" \
-      --run-ids 0 1 2 3 4\
+      --run-ids 0 1 2\
       --max-reference-graphs 1024 \
       --max-generated-graphs 1024 \
       --num-splits 5 \
@@ -313,7 +329,7 @@ for dataset in "${datasets[@]}"; do
     PYTHONPATH=src python scripts/evaluate_learned_feature_metrics.py \
       --dataset "$dataset" \
       --model "$model" \
-      --run-ids 0 1 2 3 4\
+      --run-ids 0 1 2\
       --reference-split train \
       --encoder wl_subtree \
       --max-reference-graphs 1024 \
@@ -339,83 +355,25 @@ PYTHONPATH=src python scripts/aggregate_results.py
 PYTHONPATH=src python scripts/make_latex_tables.py
 ```
 
-To generate only the QM9 molecular reporting table, run:
+By default, `aggregate_results.py` uses existing `*.aggregate.json` metric files when present; otherwise it averages all discovered per-run metric JSONs for each dataset/model/metric family. To recompute tables from an explicit subset of runs, pass run ids:
 
 ```bash
-PYTHONPATH=src python scripts/aggregate_results.py
+PYTHONPATH=src python scripts/aggregate_results.py --run-ids 0 1 2
+```
+
+To generate only the molecular reporting table, run:
+
+```bash
+PYTHONPATH=src python scripts/aggregate_results.py --run-ids 0 1 2
 PYTHONPATH=src python scripts/make_molecular_benchmark_table.py \
-  --dataset qm9 \
+  --datasets qm9 zinc \
   --models digress construct disco grum
 ```
 
-The molecular table is written to `outputs/tables/qm9_benchmark_results.tex`. Missing metric values are rendered as `--`, and GraphGUIDE/EDP-GNN are intentionally omitted from the default QM9 table because the current benchmark implementations do not support attributed molecular graphs.
+The molecular table is written to `outputs/tables/molecular_benchmark_results.tex`. Missing metric values are rendered as `--`, and GraphGUIDE/EDP-GNN are intentionally omitted from the default molecular table because the current benchmark implementations do not support attributed molecular graphs.
 
 Model hyperparameters used by the benchmark wrappers are summarized below. Values come from `configs/models/*.yaml`; public upstream defaults are used only where the wrapper keeps the upstream model shape.
 
-```latex
-\begin{table}[http]
-\centering
-\caption{Model-specific hyperparameters used in the benchmark. Values follow the benchmark model configs, with public implementation defaults used for model-shape fields left unset by the wrapper.}
-\label{tab:appendix_model_hyperparameters}
-\small
-\resizebox{\textwidth}{!}{
-\begin{tabular}{l c c c c c c c}
-\toprule
-Model & Hidden dim. & Layers & Optimizer & Learning rate & Epochs & Noise / path schedule & Checkpoint rule \\
-\midrule
-GraphGUIDE &
-$256$; GAT hidden $32$, $8$ heads &
-$4$ GNN layers &
-Adam &
-$10^{-3}$ &
-$100$ &
-Bernoulli zero-skip; $t_{\max}=1000$, $a=100$, $b=10$ &
-Final checkpoint after training \\
-DiGress &
-$d_X=256$, $d_E=64$, $d_y=64$; MLP $(256,128,128)$ &
-$5$ transformer layers &
-AdamW &
-$2\times10^{-4}$ &
-$100$ &
-Discrete marginal diffusion; cosine schedule; $T=500$ &
-Final Lightning checkpoint saved by wrapper \\
-ConStruct &
-$d_X=256$, $d_E=64$, $d_y=64$; MLP $(256,128,128)$ &
-$5$ transformer layers &
-AdamW &
-$2\times10^{-4}$ &
-$100$ &
-Absorbing-edge discrete diffusion; $T=500$ &
-Final checkpoint after training \\
-EDP-GNN &
-GIN hidden $(16,16,16,16)$; channels $(2,4,4,4,2)$ &
-$4$ GIN blocks &
-Adam + exponential LR decay &
-$10^{-3}$ &
-$100$ &
-Score noise $\sigma\in\{0.1,0.2,0.4,0.6,0.8,1.6\}$; Langevin $1000$ steps &
-Final checkpoint after training \\
-DisCo &
-$n_{\mathrm{dim}}=128$; GT $(d_X,d_E,d_y)=(256,64,64)$ &
-$5$ graph-transformer layers &
-AdamW &
-$2\times10^{-4}$ &
-$100$ &
-Marginal CTMC; $t_{\min}=0.01$; $50$ sampling steps; $\beta=2.0$, $\alpha=0.8$ &
-Best validation loss, or best training loss without validation \\
-GruM &
-$d_X=256$, $d_E=64$, $d_y=64$; MLP $(128,64,128)$ &
-$8$ transformer layers &
-AdamW &
-$2\times10^{-4}$ &
-$100$ &
-OU bridge, $1000$ scales; $X:\sigma_0=0.2,\sigma_1=0.1$; $A:\sigma_0=0.4,\sigma_1=0.2$; Euler TV sampler &
-Final checkpoint with EMA state \\
-\bottomrule
-\end{tabular}
-}
-\end{table}
-```
 
 ## 6. Paper-style PGS-JS protocol
 

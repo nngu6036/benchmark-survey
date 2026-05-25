@@ -17,8 +17,9 @@ from empirical_comparison.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-MOLECULAR_DATASETS = {"qm9"}
+MOLECULAR_DATASETS = {"qm9", "zinc"}
 DEFAULT_MODELS = ["digress", "construct", "disco", "grum"]
+DEFAULT_DATASETS = ["qm9", "zinc"]
 MODEL_NAMES = {
     "construct": "ConStruct",
     "digress": "DiGress",
@@ -27,12 +28,11 @@ MODEL_NAMES = {
 }
 
 METRIC_COLUMNS = [
-    ("degree_mmd", r"\makecell{Degree\\MMD}"),
-    ("clustering_mmd", r"\makecell{Clustering\\MMD}"),
-    ("orbit_mmd", r"\makecell{Orbit\\MMD}"),
-    ("spectral_mmd", r"\makecell{Spectral\\MMD}"),
     ("atom_type_mmd", r"\makecell{Atom-type\\MMD}"),
     ("bond_type_mmd", r"\makecell{Bond-type\\MMD}"),
+    ("validity_rate", r"\makecell{Validity\\$\uparrow$}"),
+    ("uniqueness_rate", r"\makecell{Uniqueness\\$\uparrow$}"),
+    ("novelty_rate", r"\makecell{Novelty\\$\uparrow$}"),
     ("learned_feature_mmd", r"\makecell{Feature-\\space\\MMD}"),
     ("pgs_js_distance", r"\makecell{PGS-JS\\$\downarrow$}"),
 ]
@@ -72,38 +72,42 @@ def _format_metric(row: dict[str, str] | None, metric: str, *, mean_std: bool) -
     return f"{value:.4f}"
 
 
-def _find_rows(rows: list[dict[str, str]], dataset: str) -> dict[str, dict[str, str]]:
-    selected: dict[str, dict[str, str]] = {}
+def _find_rows(rows: list[dict[str, str]]) -> dict[tuple[str, str], dict[str, str]]:
+    selected: dict[tuple[str, str], dict[str, str]] = {}
     for row in rows:
         row_dataset = str(row.get("dataset", "")).lower()
         row_model = str(row.get("model", "")).lower()
-        if row_dataset == dataset.lower() and row_model:
-            selected[row_model] = row
+        if row_dataset and row_model:
+            selected[(row_dataset, row_model)] = row
     return selected
 
 
-def _latex(dataset_rows: dict[str, dict[str, str]], models: list[str], *, mean_std: bool) -> str:
+def _latex(rows_by_key: dict[tuple[str, str], dict[str, str]], datasets: list[str], models: list[str], *, mean_std: bool) -> str:
     body = []
-    for model in models:
-        row = dataset_rows.get(model.lower())
-        values = [_format_metric(row, metric, mean_std=mean_std) for metric, _ in METRIC_COLUMNS]
-        body.append(f"{_display_model(model):<10} & " + " & ".join(values) + r" \\")
+    for dataset_idx, dataset in enumerate(datasets):
+        if dataset_idx > 0:
+            body.append(r"\midrule")
+        for model in models:
+            row = rows_by_key.get((dataset.lower(), model.lower()))
+            values = [_format_metric(row, metric, mean_std=mean_std) for metric, _ in METRIC_COLUMNS]
+            body.append(f"{dataset.upper():<4} & {_display_model(model):<10} & " + " & ".join(values) + r" \\")
 
-    header = ["Model", *(title for _, title in METRIC_COLUMNS)]
+    header = ["Dataset", "Model", *(title for _, title in METRIC_COLUMNS)]
     return "\n".join(
         [
             r"\begin{table*}[t]",
             r"\centering",
             (
-                r"\caption{Illustrative reporting template for the QM9 molecular benchmark. Lower is better for all reported "
-                r"metrics. GraphGUIDE and EDP-GNN are omitted because their current benchmark implementations do not support "
-                r"attributed molecular graphs.}"
+                r"\caption{Illustrative reporting template for molecular benchmarks. Lower is better for atom-type MMD, "
+                r"bond-type MMD, feature-space MMD, and PGS-JS; higher is better for validity, uniqueness, and novelty. "
+                r"Entries are left blank until the molecular evaluation is completed. GraphGUIDE and EDP-GNN are omitted "
+                r"because their current benchmark implementations do not support attributed molecular graphs.}"
             ),
-            r"\label{tab:qm9_benchmark_results}",
+            r"\label{tab:molecular_benchmark_results}",
             r"\small",
-            r"\setlength{\tabcolsep}{2.5pt}",
+            r"\setlength{\tabcolsep}{2.8pt}",
             r"\renewcommand{\arraystretch}{1.12}",
-            r"\begin{tabularx}{\textwidth}{l *{8}{>{\centering\arraybackslash}X}}",
+            r"\begin{tabularx}{\textwidth}{l l *{7}{>{\centering\arraybackslash}X}}",
             r"\toprule",
             " & ".join(header) + r" \\",
             r"\midrule",
@@ -117,26 +121,28 @@ def _latex(dataset_rows: dict[str, dict[str, str]], models: list[str], *, mean_s
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create a LaTeX table for molecular benchmark results.")
-    parser.add_argument("--dataset", choices=available_datasets(), default="qm9")
+    parser.add_argument("--dataset", choices=available_datasets(), default=None, help="Single molecular dataset to include. Prefer --datasets for the full table.")
+    parser.add_argument("--datasets", nargs="*", choices=available_datasets(), default=None, help="Molecular datasets to include. Defaults to QM9 and ZINC.")
     parser.add_argument("--models", nargs="*", default=DEFAULT_MODELS)
     parser.add_argument("--input", type=str, default="outputs/tables/aggregated_results.csv")
-    parser.add_argument("--output", type=str, default="outputs/tables/qm9_benchmark_results.tex")
+    parser.add_argument("--output", type=str, default="outputs/tables/molecular_benchmark_results.tex")
     parser.add_argument("--mean-std", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
 
-    dataset = args.dataset.lower()
-    if dataset not in MOLECULAR_DATASETS:
+    datasets = [d.lower() for d in (args.datasets or ([args.dataset] if args.dataset else DEFAULT_DATASETS))]
+    unsupported = [d for d in datasets if d not in MOLECULAR_DATASETS]
+    if unsupported:
         raise ValueError(f"This table layout is for molecular datasets only; supported datasets: {sorted(MOLECULAR_DATASETS)}")
 
     rows = _load_rows(Path(args.input))
-    dataset_rows = _find_rows(rows, dataset)
-    missing = [model for model in args.models if model.lower() not in dataset_rows]
+    rows_by_key = _find_rows(rows)
+    missing = [f"{dataset}/{model}" for dataset in datasets for model in args.models if (dataset, model.lower()) not in rows_by_key]
     if missing:
-        logger.info("No aggregated rows found for %s/%s; cells will be rendered as --", dataset, ", ".join(missing))
+        logger.info("No aggregated rows found for %s; cells will be rendered as --", ", ".join(missing))
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(_latex(dataset_rows, args.models, mean_std=args.mean_std) + "\n", encoding="utf-8")
+    out.write_text(_latex(rows_by_key, datasets, args.models, mean_std=args.mean_std) + "\n", encoding="utf-8")
     logger.info("Saved molecular benchmark table to %s", out)
 
 

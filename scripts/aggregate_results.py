@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -53,6 +54,31 @@ def _flatten_results(obj: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def _row_run_id(row: dict[str, Any]) -> int | None:
+    value = row.get("run_id")
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _filter_by_run_ids(rows: list[dict[str, Any]], run_ids: set[int] | None) -> list[dict[str, Any]]:
+    if run_ids is None:
+        return rows
+    filtered = []
+    for row in rows:
+        # Recompute requested subsets from individual run files. Existing
+        # aggregate JSONs may cover a different set of run ids.
+        if bool(row.get("is_aggregate", False)):
+            continue
+        row_run_id = _row_run_id(row)
+        if row_run_id in run_ids or (row_run_id is None and 0 in run_ids):
+            filtered.append(row)
+    return filtered
+
+
 def _is_numeric_series(series: pd.Series) -> bool:
     converted = pd.to_numeric(series.dropna(), errors="coerce")
     return len(converted) > 0 and converted.notna().all()
@@ -91,16 +117,18 @@ def _aggregate_individual_metric_rows(group: pd.DataFrame) -> dict[str, Any]:
     return out
 
 
-def _select_or_build_aggregate_rows(long_df: pd.DataFrame) -> pd.DataFrame:
+def _select_or_build_aggregate_rows(long_df: pd.DataFrame, *, prefer_existing_aggregates: bool = True) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     group_cols = ["dataset", "model", "metric_family"]
     for _, group in long_df.groupby(group_cols, dropna=False):
         aggregate_rows = group[group["is_aggregate"].fillna(False).astype(bool)] if "is_aggregate" in group.columns else pd.DataFrame()
-        if not aggregate_rows.empty:
+        if prefer_existing_aggregates and not aggregate_rows.empty:
             # Use the newest/last aggregate file for this metric family.
             rows.append(aggregate_rows.iloc[-1].to_dict())
         else:
-            rows.append(_aggregate_individual_metric_rows(group))
+            individual_rows = group[~group["is_aggregate"].fillna(False).astype(bool)] if "is_aggregate" in group.columns else group
+            if not individual_rows.empty:
+                rows.append(_aggregate_individual_metric_rows(individual_rows))
     return pd.DataFrame(rows)
 
 
@@ -129,7 +157,15 @@ def _make_wide(selected_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main() -> None:
-    metric_dir = Path("outputs/metrics")
+    parser = argparse.ArgumentParser(description="Aggregate metric JSON outputs into long, metric-family, and wide CSV tables.")
+    parser.add_argument("--metric-dir", type=str, default="outputs/metrics")
+    parser.add_argument("--output-dir", type=str, default="outputs/tables")
+    parser.add_argument("--run-ids", type=int, nargs="+", default=None, help="Only average these run ids. Existing aggregate JSONs are ignored when this is set.")
+    args = parser.parse_args()
+
+    metric_dir = Path(args.metric_dir)
+    output_dir = Path(args.output_dir)
+    requested_run_ids = set(args.run_ids) if args.run_ids is not None else None
     rows = []
     for path in sorted(metric_dir.glob("**/*.json")):
         # Only metric JSONs should live under outputs/metrics, but skip hidden or
@@ -144,21 +180,26 @@ def main() -> None:
         row["source_file"] = str(path)
         rows.append(row)
 
+    rows = _filter_by_run_ids(rows, requested_run_ids)
+
     if not rows:
-        logger.info("No metric files found under %s", metric_dir)
+        if requested_run_ids is None:
+            logger.info("No metric files found under %s", metric_dir)
+        else:
+            logger.info("No metric files found under %s for run ids %s", metric_dir, sorted(requested_run_ids))
         return
 
     long_df = pd.DataFrame(rows)
-    long_out = Path("outputs/tables/aggregated_results_long.csv")
+    long_out = output_dir / "aggregated_results_long.csv"
     long_out.parent.mkdir(parents=True, exist_ok=True)
     long_df.to_csv(long_out, index=False)
 
-    selected_df = _select_or_build_aggregate_rows(long_df)
-    selected_out = Path("outputs/tables/aggregated_results_by_metric_family.csv")
+    selected_df = _select_or_build_aggregate_rows(long_df, prefer_existing_aggregates=requested_run_ids is None)
+    selected_out = output_dir / "aggregated_results_by_metric_family.csv"
     selected_df.to_csv(selected_out, index=False)
 
     wide_df = _make_wide(selected_df)
-    wide_out = Path("outputs/tables/aggregated_results.csv")
+    wide_out = output_dir / "aggregated_results.csv"
     wide_df.to_csv(wide_out, index=False)
     logger.info("Saved long results to %s", long_out)
     logger.info("Saved metric-family aggregate results to %s", selected_out)

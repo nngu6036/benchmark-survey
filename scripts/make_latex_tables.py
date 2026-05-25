@@ -34,7 +34,7 @@ SYNTHETIC_COLUMNS = [
     ("orbit_mmd", r"\makecell{Orbit\\MMD}"),
     ("spectral_mmd", r"\makecell{Spectral\\MMD}"),
     ("learned_feature_mmd", r"\makecell{Feature-\\space\\MMD}"),
-    ("pgs_js_distance", r"\makecell{PGS-style\\JS}"),
+    ("pgs_js_distance", r"\makecell{PGS-JS\\$\downarrow$}"),
 ]
 
 QM9_COLUMNS = [
@@ -77,6 +77,16 @@ def _format_mean_std(row: pd.Series, col: str) -> str:
     return str(_format_value(x))
 
 
+def _numeric_value(row: pd.Series, col: str) -> float | None:
+    try:
+        value = row.get(col)
+        if pd.isna(value):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
 def _display_model(value: str) -> str:
     key = str(value)
     return MODEL_NAMES.get(key.lower(), key.replace("_", r"\_"))
@@ -111,6 +121,9 @@ def _render_table(
     label: str,
     include_dataset: bool,
     mean_std: bool,
+    tabcolsep: str = "2.5pt",
+    midrule_on_dataset_change: bool = False,
+    bold_best: bool = False,
 ) -> str:
     if df.empty:
         return ""
@@ -120,14 +133,33 @@ def _render_table(
     header = ["Dataset", "Model"] if include_dataset else ["Model"]
     header.extend(title for _, title in metric_columns)
 
+    best_by_dataset: dict[tuple[str, str], float] = {}
+    if bold_best and include_dataset:
+        for dataset, group in df.groupby(df["dataset"].astype(str).str.lower(), dropna=False):
+            for col, _ in metric_columns:
+                values = [_numeric_value(row, col) for _, row in group.iterrows()]
+                values = [value for value in values if value is not None]
+                if values:
+                    best_by_dataset[(str(dataset), col)] = min(values)
+
     rows = []
+    previous_dataset = None
     for _, row in df.iterrows():
+        current_dataset = str(row["dataset"]).lower() if include_dataset else None
+        if midrule_on_dataset_change and previous_dataset is not None and current_dataset != previous_dataset:
+            rows.append(r"\midrule")
+        previous_dataset = current_dataset
         fields = []
         if include_dataset:
             fields.append(_display_dataset(row["dataset"]))
         fields.append(_display_model(row["model"]))
         for col, _ in metric_columns:
-            fields.append(_format_mean_std(row, col) if mean_std else str(_format_value(row.get(col))))
+            value = _format_mean_std(row, col) if mean_std else str(_format_value(row.get(col)))
+            numeric = _numeric_value(row, col)
+            best = best_by_dataset.get((str(current_dataset), col)) if current_dataset is not None else None
+            if bold_best and numeric is not None and best is not None and abs(numeric - best) <= 1e-12:
+                value = rf"\textbf{{{value}}}"
+            fields.append(value)
         rows.append(" & ".join(fields) + r" \\")
 
     return "\n".join(
@@ -137,7 +169,7 @@ def _render_table(
             rf"\caption{{{caption}}}",
             rf"\label{{{label}}}",
             r"\small",
-            r"\setlength{\tabcolsep}{2.5pt}",
+            rf"\setlength{{\tabcolsep}}{{{tabcolsep}}}",
             r"\renewcommand{\arraystretch}{1.12}",
             rf"\begin{{tabularx}}{{\textwidth}}{{{colspec}}}",
             r"\toprule",
@@ -155,7 +187,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Create LaTeX benchmark tables from aggregated benchmark CSV.")
     parser.add_argument("--input", type=str, default="outputs/tables/aggregated_results.csv")
     parser.add_argument("--output", type=str, default="outputs/tables/aggregated_results.tex")
-    parser.add_argument("--mean-std", action="store_true", default=True, help="Render metric cells as mean +/- std when std columns are available.")
+    parser.add_argument("--mean-std", action=argparse.BooleanOptionalAction, default=False, help="Render metric cells as mean +/- std when std columns are available.")
     args = parser.parse_args()
 
     csv_path = Path(args.input)
@@ -175,10 +207,13 @@ def main() -> None:
         _render_table(
             synthetic_df,
             metric_columns=SYNTHETIC_COLUMNS,
-            caption="Illustrative comparison on synthetic graph benchmarks. Lower is better for discrepancy metrics.",
+            caption="Illustrative comparison on synthetic graph benchmarks. Lower is better for MMD, feature-space MMD, and PGS-JS.",
             label="tab:synthetic_benchmark_results",
             include_dataset=True,
             mean_std=args.mean_std,
+            tabcolsep="3.0pt",
+            midrule_on_dataset_change=True,
+            bold_best=True,
         ),
         _render_table(
             qm9_df,

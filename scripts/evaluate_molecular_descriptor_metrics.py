@@ -15,7 +15,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from empirical_comparison.evaluation.data_io import load_dataset_splits, metadata_path
-from empirical_comparison.evaluation.run_utils import evaluate_repeated_runs, existing_sample_path, metric_path
+from empirical_comparison.evaluation.run_utils import evaluate_repeated_runs, existing_sample_path, metric_path, sample_metadata_path
 from empirical_comparison.generation.validity import quality_metrics
 from empirical_comparison.graphs.attributes import (
     attribute_coverage,
@@ -66,6 +66,21 @@ def _load_generated_graphs(dataset: str, model: str, run_id: int | None = None) 
     if not graphs:
         raise ValueError(f"No generated graphs found in {sample_file}.")
     return graphs
+
+
+def _load_sample_metadata(dataset: str, model: str, run_id: int | None = None) -> dict[str, Any]:
+    path = sample_metadata_path(dataset, model, run_id=run_id)
+    if not path.exists() and run_id == 0:
+        legacy = sample_metadata_path(dataset, model, run_id=None)
+        if legacy.exists():
+            path = legacy
+    if not path.exists():
+        return {}
+    try:
+        payload = load_json(path)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
 
 
 def _subsample(graphs: Sequence[nx.Graph], max_graphs: int | None, seed: int) -> list[nx.Graph]:
@@ -236,6 +251,7 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
     max_gen_graphs = args.max_generated_graphs if args.max_generated_graphs is not None else args.max_graphs
     ref_graphs = _subsample(_load_reference_graphs(args.dataset, args.dataset_root, args.reference_split), max_ref_graphs, seed)
     gen_graphs = _subsample(_load_generated_graphs(args.dataset, args.model, run_id=args.run_id), max_gen_graphs, seed + 1)
+    sample_metadata = _load_sample_metadata(args.dataset, args.model, run_id=args.run_id)
     train_graphs = _load_train_graphs(args.dataset, args.dataset_root)
 
     attr_schema = normalize_schema({
@@ -362,6 +378,15 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
     )
     results.update(generic_quality)
     results.update(molecular_quality)
+    sample_graph_attrs = sample_metadata.get("graph_attributes", {}) if isinstance(sample_metadata.get("graph_attributes"), dict) else {}
+    fallback_reason = sample_graph_attrs.get("fallback_attribute_postprocessing_reason")
+    if fallback_reason == "molecular_label_fallback":
+        logger.warning(
+            "%s/%s run_id=%s used molecular_label_fallback during sampling. Molecular validity reflects labels/bonds attached from empirical marginals, not labels generated natively by GruM.",
+            args.dataset,
+            args.model,
+            args.run_id,
+        )
 
     elapsed = time.perf_counter() - start
     payload = {
@@ -395,6 +420,12 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
             "raw_node_label_values_for_rdkit_source": rdkit_node_value_source,
             "rdkit_atomic_number_mapping_source": rdkit_mapping_source,
             "raw_edge_label_values_for_rdkit": raw_edge_values,
+            "sample_attribute_postprocessing": {
+                "applied": sample_graph_attrs.get("fallback_attribute_postprocessing_applied"),
+                "reason": fallback_reason,
+                "note": sample_graph_attrs.get("fallback_note"),
+                "model_capabilities": sample_graph_attrs.get("model_capabilities"),
+            },
         },
         "notes": {
             "rdkit_validity": "Generated graphs are converted to RDKit molecules using node_label/edge_type mappings and sanitized. When RDKit construction fails, a conservative valence fallback is recorded by validity_backend.",

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter, defaultdict
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -12,11 +14,55 @@ if str(SRC) not in sys.path:
 
 from empirical_comparison.evaluation.data_io import build_dataset_splits, save_dataset_splits
 from empirical_comparison.registry import available_datasets
-from empirical_comparison.utils.io import load_yaml
+from empirical_comparison.utils.io import load_pickle, load_yaml
 from empirical_comparison.utils.logging import get_logger
 from empirical_comparison.utils.seed import set_seed
 
 logger = get_logger(__name__)
+
+
+def _node_label_value(data: dict[str, Any]) -> Any:
+    return data.get("node_label", data.get("atom_type", data.get("label")))
+
+
+def _node_feature_scalar(data: dict[str, Any]) -> Any:
+    value = data.get("feats", data.get("feature", data.get("x")))
+    if value is None:
+        return None
+    try:
+        if hasattr(value, "detach"):
+            value = value.detach().cpu().numpy()
+        if isinstance(value, (list, tuple)) and value:
+            return value[0]
+        if hasattr(value, "reshape"):
+            arr = value.reshape(-1)
+            if len(arr):
+                item = arr[0]
+                return item.item() if hasattr(item, "item") else item
+    except Exception:
+        return None
+    return value
+
+
+def _summarize_atom_types(splits: dict[str, list], *, title: str) -> None:
+    counts: dict[str, Counter] = {}
+    feature_examples: dict[Any, set[str]] = defaultdict(set)
+    for split, graphs in splits.items():
+        counter = Counter()
+        for graph in graphs:
+            for _, data in graph.nodes(data=True):
+                label = _node_label_value(data)
+                counter[label] += 1
+                feature = _node_feature_scalar(data)
+                if feature is not None and len(feature_examples[label]) < 5:
+                    feature_examples[label].add(str(feature))
+        counts[split] = counter
+    logger.info("%s atom_type/node_label counts:", title)
+    for split, counter in counts.items():
+        logger.info("  %s: %s", split, dict(sorted(counter.items(), key=lambda item: str(item[0]))))
+    if feature_examples:
+        mapping = {label: sorted(values) for label, values in sorted(feature_examples.items(), key=lambda item: str(item[0]))}
+        logger.info("  node_label -> example first feature values: %s", mapping)
 
 
 def main() -> None:
@@ -50,7 +96,15 @@ def main() -> None:
 
     start = time.perf_counter()
     splits = build_dataset_splits(args.dataset, cfg)
+    if args.dataset.lower() == "zinc":
+        _summarize_atom_types(splits, title="Raw ZINC")
     save_dataset_splits(args.dataset, splits, cfg, output_root=args.output_root, force=args.force)
+    if args.dataset.lower() == "zinc":
+        persisted = {
+            split: load_pickle(Path(args.output_root) / args.dataset / f"{split}.pkl")
+            for split in ("train", "val", "test")
+        }
+        _summarize_atom_types(persisted, title="Canonical ZINC")
     elapsed = time.perf_counter() - start
     logger.info("Prepared dataset %s with sizes: %s", args.dataset, {k: len(v) for k, v in splits.items()})
     logger.info("Saved dataset artifacts to %s in %.2fs", out_dir, elapsed)

@@ -75,6 +75,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--force", action="store_true", help="Overwrite existing persisted splits and metadata.")
     parser.add_argument("--dry-run", action="store_true", help="Validate config and print planned outputs without writing files.")
+    parser.add_argument("--inspect-atom-types", action="store_true", help="Print atom-type/node-label summaries without writing dataset files.")
     args = parser.parse_args()
 
     cfg_path = Path(args.config) if args.config else Path("configs/datasets") / f"{args.dataset}.yaml"
@@ -92,6 +93,18 @@ def main() -> None:
     logger.info("dataset=%s config=%s seed=%s output=%s", args.dataset, cfg_path, seed, out_dir)
     if args.dry_run:
         logger.info("Dry run: would build %s and write train/val/test splits to %s", args.dataset, out_dir)
+        return
+    if args.inspect_atom_types:
+        if args.dataset.lower() == "zinc":
+            existing_paths = [out_dir / f"{split}.pkl" for split in ("train", "val", "test")]
+            if all(path.exists() for path in existing_paths):
+                persisted = {split: load_pickle(out_dir / f"{split}.pkl") for split in ("train", "val", "test")}
+                _summarize_atom_types(persisted, title="Persisted canonical ZINC")
+                return
+            splits = build_dataset_splits(args.dataset, cfg)
+            _summarize_atom_types(splits, title="Raw ZINC")
+            return
+        logger.info("--inspect-atom-types is currently only meaningful for ZINC.")
         return
 
     start = time.perf_counter()

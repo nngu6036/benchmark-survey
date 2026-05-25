@@ -383,10 +383,16 @@ PYTHONPATH=src python scripts/aggregate_results.py
 PYTHONPATH=src python scripts/make_latex_tables.py
 ```
 
-By default, `aggregate_results.py` uses existing `*.aggregate.json` metric files when present; otherwise it averages all discovered per-run metric JSONs for each dataset/model/metric family. To recompute tables from an explicit subset of runs, pass run ids:
+By default, `aggregate_results.py` uses existing `*.aggregate.json` metric files when present; otherwise it averages all discovered per-run metric JSONs for each dataset/model/metric family. To recompute tables from an explicit subset of datasets, models, or runs, pass filters:
 
 ```bash
-PYTHONPATH=src python scripts/aggregate_results.py --run-ids 0 1 2
+PYTHONPATH=src python scripts/aggregate_results.py \
+  --datasets planar sbm \
+  --models digress construct disco grum \
+  --run-ids 0 1 2
+PYTHONPATH=src python scripts/make_latex_tables.py \
+  --datasets planar sbm \
+  --models digress construct disco grum
 ```
 
 To generate only the molecular reporting table, run:

@@ -51,3 +51,33 @@ def test_make_latex_tables_renders_synthetic_template(tmp_path, monkeypatch):
     assert r"\makecell{PGS-JS\\$\downarrow$}" in latex
     assert r"Planar & GruM & 0.0034 & \textbf{0.0722} & \textbf{0.4487} & \textbf{0.0038} & \textbf{0.4312} & \textbf{0.4005} \\" in latex
     assert r"SBM & DiGress & \textbf{0.0006} & \textbf{0.1153} & \textbf{0.0172} & \textbf{0.0062} & \textbf{0.0242} & \textbf{0.1491} \\" in latex
+
+
+def test_make_latex_tables_filters_requested_datasets_and_models(tmp_path, monkeypatch):
+    module = _load_script_module()
+    csv_path = tmp_path / "aggregated_results.csv"
+    out_path = tmp_path / "tables.tex"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "dataset,model,degree_mmd,clustering_mmd,orbit_mmd,spectral_mmd,learned_feature_mmd,pgs_js_distance",
+                "planar,construct,0.0605,1.0633,1.5063,0.0519,1.4007,0.9925",
+                "planar,grum,0.0034,0.0722,0.4487,0.0038,0.4312,0.4005",
+                "sbm,grum,0.0206,0.4554,0.5546,0.0849,0.6172,0.8396",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["make_latex_tables.py", "--input", str(csv_path), "--output", str(out_path), "--datasets", "planar", "--models", "grum"],
+    )
+    module.main()
+
+    latex = out_path.read_text(encoding="utf-8")
+    assert "Planar & GruM" in latex
+    assert "Planar & ConStruct" not in latex
+    assert "SBM & GruM" not in latex

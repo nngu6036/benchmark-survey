@@ -31,6 +31,18 @@ def _write_metric(path: Path, *, run_id: int | None, score: float, aggregate: bo
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _write_metric_for(path: Path, *, dataset: str, model: str, score: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "dataset": dataset,
+        "model": model,
+        "metric_family": "demo",
+        "runtime_seconds": 1.0,
+        "results": {"score": score},
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def test_aggregate_results_filters_requested_run_ids(tmp_path, monkeypatch):
     module = _load_script_module()
     monkeypatch.chdir(tmp_path)
@@ -46,3 +58,19 @@ def test_aggregate_results_filters_requested_run_ids(tmp_path, monkeypatch):
     assert "2.0" in wide
     assert "999.0" not in wide
     assert "100.0" not in wide
+
+
+def test_aggregate_results_filters_requested_datasets_and_models(tmp_path, monkeypatch):
+    module = _load_script_module()
+    monkeypatch.chdir(tmp_path)
+    _write_metric_for(tmp_path / "outputs/metrics/qm9/digress/demo.json", dataset="qm9", model="digress", score=1.0)
+    _write_metric_for(tmp_path / "outputs/metrics/qm9/grum/demo.json", dataset="qm9", model="grum", score=2.0)
+    _write_metric_for(tmp_path / "outputs/metrics/zinc/grum/demo.json", dataset="zinc", model="grum", score=3.0)
+
+    monkeypatch.setattr(sys, "argv", ["aggregate_results.py", "--datasets", "qm9", "--models", "grum"])
+    module.main()
+
+    wide = (tmp_path / "outputs/tables/aggregated_results.csv").read_text(encoding="utf-8")
+    assert "qm9,grum" in wide
+    assert "qm9,digress" not in wide
+    assert "zinc,grum" not in wide

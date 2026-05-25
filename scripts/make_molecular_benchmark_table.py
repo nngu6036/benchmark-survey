@@ -11,7 +11,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from empirical_comparison.registry import available_datasets
+from empirical_comparison.registry import available_datasets, available_models
 from empirical_comparison.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -137,8 +137,8 @@ def _latex(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create a LaTeX table for molecular benchmark results.")
     parser.add_argument("--dataset", choices=available_datasets(), default=None, help="Single molecular dataset to include. Prefer --datasets for the full table.")
-    parser.add_argument("--datasets", nargs="*", choices=available_datasets(), default=None, help="Molecular datasets to include. Defaults to QM9 and ZINC.")
-    parser.add_argument("--models", nargs="*", default=DEFAULT_MODELS)
+    parser.add_argument("--datasets", nargs="+", choices=available_datasets(), default=None, help="Molecular datasets to include. Defaults to QM9 and ZINC.")
+    parser.add_argument("--models", nargs="+", choices=available_models(), default=DEFAULT_MODELS, help="Models to include.")
     parser.add_argument("--input", type=str, default="outputs/tables/aggregated_results.csv")
     parser.add_argument("--output", type=str, default="outputs/tables/molecular_benchmark_results.tex")
     parser.add_argument("--simple-output", type=str, default=None, help="Path for the simplified table without standard deviations. Defaults to <output stem>_simple.tex.")

@@ -134,8 +134,8 @@ def _latex(rows: list[dict[str, str]]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create LaTeX compute-budget table from train/sample metadata.")
-    parser.add_argument("--datasets", nargs="*", choices=available_datasets(), default=["planar", "sbm"])
-    parser.add_argument("--models", nargs="*", choices=available_models(), default=["graphguide", "digress", "construct", "edp_gnn", "disco", "grum"])
+    parser.add_argument("--datasets", nargs="+", choices=available_datasets(), default=["planar", "sbm"], help="Datasets to include.")
+    parser.add_argument("--models", nargs="+", choices=available_models(), default=["graphguide", "digress", "construct", "edp_gnn", "disco", "grum"], help="Models to include.")
     parser.add_argument("--output", type=str, default="outputs/tables/compute_budget.tex")
     args = parser.parse_args()
 

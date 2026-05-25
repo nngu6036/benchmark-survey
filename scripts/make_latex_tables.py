@@ -11,6 +11,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from empirical_comparison.registry import available_datasets, available_models
 from empirical_comparison.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -187,6 +188,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Create LaTeX benchmark tables from aggregated benchmark CSV.")
     parser.add_argument("--input", type=str, default="outputs/tables/aggregated_results.csv")
     parser.add_argument("--output", type=str, default="outputs/tables/aggregated_results.tex")
+    parser.add_argument("--datasets", nargs="+", choices=available_datasets(), default=None, help="Datasets to include. Defaults to all supported rows in the input CSV.")
+    parser.add_argument("--models", nargs="+", choices=available_models(), default=None, help="Models to include. Defaults to all models in the input CSV.")
     parser.add_argument("--mean-std", action=argparse.BooleanOptionalAction, default=False, help="Render metric cells as mean +/- std when std columns are available.")
     args = parser.parse_args()
 
@@ -200,6 +203,14 @@ def main() -> None:
         raise ValueError("Aggregated results must include dataset and model columns.")
 
     df["dataset_key"] = df["dataset"].astype(str).str.lower()
+    df["model_key"] = df["model"].astype(str).str.lower()
+    if args.datasets is not None:
+        dataset_filter = {dataset.lower() for dataset in args.datasets}
+        df = df[df["dataset_key"].isin(dataset_filter)]
+    if args.models is not None:
+        model_filter = {model.lower() for model in args.models}
+        df = df[df["model_key"].isin(model_filter)]
+
     synthetic_df = _ordered_rows(df[df["dataset_key"].isin(SYNTHETIC_DATASETS)].drop(columns=["dataset_key"]))
     qm9_df = _ordered_rows(df[df["dataset_key"].eq("qm9")].drop(columns=["dataset_key"]), qm9=True)
 

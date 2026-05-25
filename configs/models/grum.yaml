@@ -86,6 +86,11 @@ noise_removal: true
 quantize_threshold: 0.5
 kernel: tv
 
+# GruM_2D is an adjacency generator. For QM9, assign atom/bond labels after
+# sampling with a simple valence-constrained postprocessor instead of the
+# unconstrained empirical-label fallback used for generic molecular wrappers.
+qm9_constrained_postprocess: true
+
 # Used only when loading an old upstream checkpoint without saved train node-count metadata.
 min_nodes: 1
 max_nodes: 64

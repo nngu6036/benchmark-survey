@@ -57,3 +57,32 @@ graph_attributes:
 # PyG ZINC atom_type values are categorical ids; RDKit validity requires explicit
 # atomic_number/z node attributes or a symbol-valued mapping supplied by the user.
 rdkit_atomic_number_mapping: null
+
+# Observed with:
+#   python scripts/prepare_data.py --dataset zinc --inspect-atom-types
+# This maps the persisted canonical node_label values back to the first node
+# feature value, which preserves PyG's raw ZINC atom_type category in the current
+# prepared files. These are still categorical atom_type ids, not atomic numbers,
+# so they must not be copied into rdkit_atomic_number_mapping.
+canonical_node_label_to_raw_atom_type:
+  0: 0
+  1: 1
+  2: 10
+  3: 11
+  4: 12
+  5: 13
+  6: 14
+  7: 15
+  8: 16
+  9: 17
+  10: 18
+  11: 19
+  12: 2
+  13: 20
+  14: 3
+  15: 4
+  16: 5
+  17: 6
+  18: 7
+  19: 8
+  20: 9

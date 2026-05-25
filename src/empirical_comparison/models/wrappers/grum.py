@@ -191,6 +191,9 @@ class GruMWrapper:
     supports_variable_size = True
     supports_featureless_graphs = True
 
+    _QM9_VALENCE_BY_LABEL = {0: 1, 1: 4, 2: 3, 3: 2, 4: 1}
+    _QM9_DEFAULT_LABEL_PROBS = {0: 0.45, 1: 0.35, 2: 0.06, 3: 0.12, 4: 0.02}
+
     def __init__(self, config: Dict[str, Any]):
         self.config: Dict[str, Any] = dict(config or {})
         default_repo_root = Path(__file__).resolve().parents[4] / "external" / "GruM"
@@ -527,6 +530,8 @@ class GruMWrapper:
             graphs.extend(self._adjs_to_graphs(adj, masks))
             update_progress(progress_callback, min(len(graphs), num_graphs) - min(before, num_graphs))
         graphs = graphs[:num_graphs]
+        if self.dataset_name == "qm9" and bool(self._cfg("qm9_constrained_postprocess", True)):
+            graphs = self._qm9_constrained_postprocess_graphs(graphs, seed=seed)
         assert_finite_graphs(graphs, context=f"GruM sample output dataset={self.dataset_name}")
         return graphs
 
@@ -1110,6 +1115,64 @@ class GruMWrapper:
                 g.nodes[node]["feats"] = [1.0]
             graphs.append(g)
         return graphs
+
+    def _qm9_constrained_postprocess_graphs(self, graphs: Sequence[nx.Graph], *, seed: int) -> List[nx.Graph]:
+        rng = random.Random(int(seed))
+        out: List[nx.Graph] = []
+        removed_edges = 0
+        for graph in graphs:
+            h = nx.convert_node_labels_to_integers(nx.Graph(graph), ordering="default")
+            removed_edges += self._prune_edges_to_max_degree(h, max_degree=4, rng=rng)
+            for node in h.nodes:
+                degree = int(h.degree(node))
+                label = self._sample_qm9_label_for_degree(degree, rng)
+                h.nodes[node]["node_label"] = int(label)
+                h.nodes[node]["feats"] = [float(label)]
+            for u, v in h.edges:
+                h.edges[u, v]["edge_type"] = 1
+                h.edges[u, v]["edge_attr"] = [1.0]
+            h.graph["grum_qm9_constrained_postprocess"] = True
+            h.graph["grum_qm9_postprocess_note"] = (
+                "GruM generated adjacency only; QM9 atom labels and single bonds were assigned by a valence-constrained benchmark postprocessor."
+            )
+            out.append(h)
+        diag = self._last_sampling_diagnostics
+        diag["qm9_constrained_postprocess"] = True
+        diag["qm9_postprocess_removed_edges"] = int(diag.get("qm9_postprocess_removed_edges", 0)) + int(removed_edges)
+        return out
+
+    def _prune_edges_to_max_degree(self, graph: nx.Graph, *, max_degree: int, rng: random.Random) -> int:
+        removed = 0
+        while graph.number_of_edges() and any(int(deg) > int(max_degree) for _, deg in graph.degree()):
+            overloaded = [node for node, deg in graph.degree() if int(deg) > int(max_degree)]
+            node = max(overloaded, key=lambda n: int(graph.degree(n)))
+            neighbors = list(graph.neighbors(node))
+            if not neighbors:
+                break
+            neighbor = max(neighbors, key=lambda n: int(graph.degree(n)))
+            if graph.has_edge(node, neighbor):
+                graph.remove_edge(node, neighbor)
+                removed += 1
+            else:
+                break
+        return removed
+
+    def _sample_qm9_label_for_degree(self, degree: int, rng: random.Random) -> int:
+        candidates = {
+            label: prob
+            for label, prob in self._QM9_DEFAULT_LABEL_PROBS.items()
+            if int(self._QM9_VALENCE_BY_LABEL[label]) >= int(degree)
+        }
+        if not candidates:
+            return 1
+        total = float(sum(candidates.values()))
+        threshold = rng.random() * total
+        cumulative = 0.0
+        for label, prob in sorted(candidates.items()):
+            cumulative += float(prob)
+            if cumulative >= threshold:
+                return int(label)
+        return int(next(reversed(candidates)))
 
     # ------------------------------------------------------------------
     # Metadata and utility methods

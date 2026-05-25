@@ -310,11 +310,7 @@ def _generate_samples(
             float(before_cov.get("node_label_coverage", 0.0) or 0.0) >= 0.999
             and (edge_count == 0 or float(before_cov.get("edge_label_coverage", 0.0) or 0.0) >= 0.999)
         )
-        needs_label_fallback = molecular_like and (
-            not bool(caps.get("supports_node_labels", False))
-            or not bool(caps.get("supports_edge_labels", False))
-            or not generated_has_labels
-        )
+        needs_label_fallback = molecular_like and not generated_has_labels
         if overwrite or not before_cov.get("has_any_attributes", False) or needs_label_fallback:
             graphs = apply_empirical_attributes(graphs, attr_stats, seed=seed, overwrite=overwrite or needs_label_fallback)
             assert_finite_graphs(graphs, context=f"attribute postprocessing {dataset}/{model_name} seed={seed}")

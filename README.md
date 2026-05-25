@@ -47,6 +47,19 @@ PYTHONPATH=src python scripts/prepare_data.py \
   --force
 ```
 
+To inspect ZINC atom-type/category values without overwriting existing prepared
+splits, use:
+
+```bash
+PYTHONPATH=src python scripts/prepare_data.py \
+  --dataset zinc \
+  --inspect-atom-types
+```
+
+This prints raw/canonical `atom_type` or `node_label` counts when available and
+then exits. It does not rewrite `outputs/datasets/zinc/*.pkl`, so it does not
+require retraining models.
+
 The real-dataset builders convert PyG `Data` objects into NetworkX graphs with this benchmark schema:
 
 ```yaml
@@ -102,14 +115,14 @@ for run_id in {0..2}; do
 
     PYTHONPATH=src python scripts/train_model.py \
     --dataset sbm \
-    --model construct \
+    --model graphguide \
     --seed "$seed" \
     --run-id "$run_id" \
     --use-run-paths
 
   PYTHONPATH=src python scripts/generate_samples.py \
     --dataset sbm \
-    --model construct \
+    --model graphguide \
     --num-samples 1024 \
     --seed "$seed" \
     --run-id "$run_id" \
@@ -118,14 +131,14 @@ for run_id in {0..2}; do
 
   PYTHONPATH=src python scripts/train_model.py \
     --dataset planar \
-    --model construct \
+    --model graphguide \
     --seed "$seed" \
     --run-id "$run_id" \
     --use-run-paths
 
   PYTHONPATH=src python scripts/generate_samples.py \
     --dataset planar \
-    --model construct \
+    --model graphguide \
     --num-samples 1024 \
     --seed "$seed" \
     --run-id "$run_id" \
@@ -224,7 +237,8 @@ For expensive upstream wrappers, start with `dummy`, `construct`, or `disco` on 
 - `DisCoWrapper`: trains and samples categorical node labels and categorical edge types in the dense discrete state.
 - `GraphGUIDEWrapper`: conditions on numeric node features.
 - `EDPGNNWrapper`: accepts numeric node features; generated output uses benchmark fallback attributes unless the upstream model is extended.
-- `DiGressWrapper` and `GruMWrapper`: remain primarily structural in this integration; generated attributes may be attached by empirical fallback postprocessing and are marked in sample metadata.
+- `DiGressWrapper`: remains primarily structural in this integration; generated attributes may be attached by empirical fallback postprocessing and are marked in sample metadata.
+- `GruMWrapper`: targets GruM's generic 2D adjacency generator. For QM9, sampled adjacencies are postprocessed with a simple valence-constrained atom/bond labeller (`qm9_constrained_postprocess: true`) so molecular validity is meaningful; for other attributed molecular settings, generated attributes may still use fallback postprocessing.
 
 For attributed datasets such as QM9 and ZINC, the benchmark still runs all wrappers, but the metadata should be checked to distinguish native attribute generation from fallback empirical attribute attachment.
 

@@ -52,9 +52,12 @@ splits, use:
 
 ```bash
 PYTHONPATH=src python scripts/prepare_zinc_from_smiles.py \
-  --csv data/zinc_smiles.csv \
+  --csv data/zinc250k.csv \
   --smiles-col smiles \
-  --split-col split \
+  --train-count 10000 \
+  --val-count 1000 \
+  --test-count 1000 \
+  --seed 42 \
   --force
 ```
 
@@ -117,14 +120,14 @@ for run_id in {0..2}; do
 
     PYTHONPATH=src python scripts/train_model.py \
     --dataset sbm \
-    --model graphguide \
+    --model construct \
     --seed "$seed" \
     --run-id "$run_id" \
     --use-run-paths
 
   PYTHONPATH=src python scripts/generate_samples.py \
     --dataset sbm \
-    --model graphguide \
+    --model construct \
     --num-samples 1024 \
     --seed "$seed" \
     --run-id "$run_id" \
@@ -133,14 +136,14 @@ for run_id in {0..2}; do
 
   PYTHONPATH=src python scripts/train_model.py \
     --dataset planar \
-    --model graphguide \
+    --model construct \
     --seed "$seed" \
     --run-id "$run_id" \
     --use-run-paths
 
   PYTHONPATH=src python scripts/generate_samples.py \
     --dataset planar \
-    --model graphguide \
+    --model construct \
     --num-samples 1024 \
     --seed "$seed" \
     --run-id "$run_id" \

@@ -11,3 +11,4 @@ omegaconf>=2.3
 pytorch-lightning>=2.0
 easydict>=1.10
 pytest>=8.0
+rdkit>=2026.3.2

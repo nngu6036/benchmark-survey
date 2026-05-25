@@ -209,6 +209,27 @@ def _explicit_rdkit_node_mapping(dataset: str) -> tuple[list[str], str | None]:
     return [], None
 
 
+def _rdkit_node_label_values(
+    *,
+    dataset: str,
+    explicit_raw_node_values: Sequence[str],
+    metadata_raw_node_values: Sequence[str],
+    canonical_node_label_values: Sequence[str],
+) -> tuple[list[str], str | None]:
+    if explicit_raw_node_values:
+        return list(explicit_raw_node_values), "dataset_config"
+    dataset_key = dataset.lower()
+    if dataset_key == "qm9":
+        # The evaluation canonicalization may combine reference labels and
+        # generated labels.  Use that exact vocabulary so generated labels that
+        # were emitted as raw atomic numbers can still be resolved after
+        # canonicalization.
+        return list(canonical_node_label_values), "evaluation_canonical_labels"
+    if metadata_raw_node_values:
+        return list(metadata_raw_node_values), "dataset_metadata_raw_labels"
+    return list(canonical_node_label_values), "evaluation_canonical_labels"
+
+
 def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
     start = time.perf_counter()
     max_ref_graphs = args.max_reference_graphs if args.max_reference_graphs is not None else args.max_graphs
@@ -232,6 +253,12 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
     gen_graphs, _ = canonicalize_graph_attributes(gen_graphs, attr_schema, attr_stats)
     raw_node_values, raw_edge_values = _raw_attribute_values(args.dataset, args.dataset_root)
     explicit_raw_node_values, rdkit_mapping_source = _explicit_rdkit_node_mapping(args.dataset)
+    rdkit_node_values, rdkit_node_value_source = _rdkit_node_label_values(
+        dataset=args.dataset,
+        explicit_raw_node_values=explicit_raw_node_values,
+        metadata_raw_node_values=raw_node_values,
+        canonical_node_label_values=attr_stats.node_label_values,
+    )
 
     logger.info(
         "Evaluating molecular descriptor metrics: dataset=%s model=%s run_id=%s ref_split=%s ref=%d gen=%d",
@@ -329,7 +356,7 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
         train_graphs,
         node_label_attr=attr_schema["node_label_attr"],
         edge_label_attr=attr_schema["edge_label_attr"],
-        raw_node_label_values=explicit_raw_node_values or raw_node_values or attr_stats.node_label_values,
+        raw_node_label_values=rdkit_node_values,
         raw_edge_label_values=raw_edge_values or attr_stats.edge_label_values,
         dataset=args.dataset,
     )
@@ -364,7 +391,8 @@ def _evaluate(args, *, seed: int, output_path: Path | None) -> dict:
             "attribute_mmd": not args.no_attribute_mmd,
             "rdkit_validity": True,
             "attribute_schema": attr_schema,
-            "raw_node_label_values_for_rdkit": explicit_raw_node_values or raw_node_values,
+            "raw_node_label_values_for_rdkit": rdkit_node_values,
+            "raw_node_label_values_for_rdkit_source": rdkit_node_value_source,
             "rdkit_atomic_number_mapping_source": rdkit_mapping_source,
             "raw_edge_label_values_for_rdkit": raw_edge_values,
         },

@@ -106,10 +106,20 @@ def atomic_number_from_graph_label(
     dataset_key = str(dataset or "").lower()
     label = data.get(node_label_attr)
     label_int = _as_int(label)
-    if dataset_key == "qm9" and label_int in _QM9_CLASS_TO_ATOMIC_NUMBER:
-        return _QM9_CLASS_TO_ATOMIC_NUMBER[int(label_int)]
-
     raw = _raw_value_from_canonical(label, raw_node_label_values, offset=0)
+    if dataset_key == "qm9":
+        raw_atomic_number = _periodic_atomic_number(raw)
+        if label_int in _QM9_CLASS_TO_ATOMIC_NUMBER:
+            # Canonical QM9 classes are normally 0:H, 1:C, 2:N, 3:O, 4:F.
+            # If the current evaluation vocabulary maps the class back to a
+            # real QM9 atomic number, use that mapping; otherwise preserve the
+            # historical class-order interpretation.
+            if raw_atomic_number in {1, 6, 7, 8, 9} and _as_int(raw) not in _QM9_CLASS_TO_ATOMIC_NUMBER:
+                return int(raw_atomic_number)
+            return _QM9_CLASS_TO_ATOMIC_NUMBER[int(label_int)]
+        if raw_atomic_number in {1, 6, 7, 8, 9}:
+            return int(raw_atomic_number)
+
     if dataset_key == "zinc":
         # PyG ZINC atom_type values are categorical ids, not guaranteed
         # periodic-table atomic numbers.  Reject bare numeric category values
@@ -144,6 +154,68 @@ def atomic_number_from_graph_label(
     if atomic_number is not None:
         return atomic_number
     return None
+
+
+def _label_aware_graph_fingerprint(
+    graph: nx.Graph,
+    *,
+    node_label_attr: str,
+    edge_label_attr: str,
+) -> str:
+    try:
+        h = nx.Graph()
+        for node, data in graph.nodes(data=True):
+            h.add_node(node, label=str(data.get(node_label_attr, "")))
+        for u, v, data in graph.edges(data=True):
+            h.add_edge(u, v, label=str(data.get(edge_label_attr, "")))
+        return nx.weisfeiler_lehman_graph_hash(h, node_attr="label", edge_attr="label")
+    except Exception:
+        nodes = sorted(str(data.get(node_label_attr, "")) for _, data in graph.nodes(data=True))
+        edges = sorted(
+            (str(graph.nodes[u].get(node_label_attr, "")), str(graph.nodes[v].get(node_label_attr, "")), str(data.get(edge_label_attr, "")))
+            for u, v, data in graph.edges(data=True)
+        )
+        return repr((nodes, edges))
+
+
+def _categorical_graph_quality_metrics(
+    generated_graphs: Sequence[nx.Graph],
+    train_graphs: Sequence[nx.Graph],
+    *,
+    node_label_attr: str,
+    edge_label_attr: str,
+) -> dict[str, Any]:
+    valid_flags = [
+        isinstance(graph, nx.Graph)
+        and graph.number_of_nodes() > 0
+        and not any(u == v for u, v in graph.edges())
+        for graph in generated_graphs
+    ]
+    valid_graphs = [graph for graph, ok in zip(generated_graphs, valid_flags) if ok]
+    fingerprints = [
+        _label_aware_graph_fingerprint(graph, node_label_attr=node_label_attr, edge_label_attr=edge_label_attr)
+        for graph in valid_graphs
+    ]
+    unique_fingerprints = sorted(set(fingerprints))
+    train_fingerprints = {
+        _label_aware_graph_fingerprint(graph, node_label_attr=node_label_attr, edge_label_attr=edge_label_attr)
+        for graph in train_graphs
+    }
+    novel_unique = [fp for fp in unique_fingerprints if fp not in train_fingerprints]
+    n_total = len(generated_graphs)
+    n_valid = int(sum(valid_flags))
+    n_unique = len(unique_fingerprints)
+    return {
+        "validity_rate": float(n_valid / n_total) if n_total else 0.0,
+        "dataset_validity_rate": float(n_valid / n_total) if n_total else 0.0,
+        "uniqueness_rate": float(n_unique / max(len(fingerprints), 1)) if fingerprints else 0.0,
+        "novelty_rate": float(len(novel_unique) / max(n_unique, 1)) if train_graphs and n_unique else (None if not train_graphs else 0.0),
+        "valid_unique_novel_rate": float(len(novel_unique) / n_total) if n_total and train_graphs else None,
+        "num_valid_molecules": n_valid,
+        "num_unique_valid_molecules": n_unique,
+        "num_novel_unique_molecules": len(novel_unique) if train_graphs else None,
+        "validity_backend": "categorical_graph_fingerprint_fallback",
+    }
 
 
 def bond_type_from_graph_label(edge_value: Any, raw_edge_label_values: Sequence[str] | None = None):
@@ -370,8 +442,15 @@ def molecular_quality_metrics(
         dataset=dataset,
     )
     valid_smiles = [s for ok, s in zip(gen_eval.valid_flags, gen_eval.smiles) if ok and s]
+    valid_identifiers = [
+        s if s else _label_aware_graph_fingerprint(graph, node_label_attr=node_label_attr, edge_label_attr=edge_label_attr)
+        for graph, ok, s in zip(generated_graphs, gen_eval.valid_flags, gen_eval.smiles)
+        if ok
+    ]
     unique_valid_smiles = sorted(set(valid_smiles))
+    unique_valid_identifiers = sorted(set(valid_identifiers))
     train_smiles: set[str] = set()
+    train_identifiers: set[str] = set()
     if train_graphs:
         train_eval = evaluate_molecular_validity(
             train_graphs,
@@ -382,15 +461,37 @@ def molecular_quality_metrics(
             dataset=dataset,
         )
         train_smiles = {s for ok, s in zip(train_eval.valid_flags, train_eval.smiles) if ok and s}
-    novel_unique = [s for s in unique_valid_smiles if s not in train_smiles]
+        train_identifiers = {
+            s if s else _label_aware_graph_fingerprint(graph, node_label_attr=node_label_attr, edge_label_attr=edge_label_attr)
+            for graph, ok, s in zip(train_graphs, train_eval.valid_flags, train_eval.smiles)
+            if ok
+        }
     n_total = len(generated_graphs)
     n_valid = int(sum(gen_eval.valid_flags))
-    n_unique = len(unique_valid_smiles)
+    if n_total and n_valid == 0 and str(dataset or "").lower() == "zinc":
+        out = _categorical_graph_quality_metrics(
+            generated_graphs,
+            train_graphs,
+            node_label_attr=node_label_attr,
+            edge_label_attr=edge_label_attr,
+        )
+        out.update({
+            "rdkit_validity_rate": 0.0,
+            "rdkit_available": bool(gen_eval.rdkit_available),
+            "rdkit_construction_failures": int(gen_eval.construction_failures),
+            "zinc_categorical_label_note": (
+                "PyG ZINC atom_type labels are categorical; integer category ids are not treated as atomic numbers. "
+                "Validity/uniqueness/novelty fell back to labelled graph fingerprints because no explicit RDKit atom mapping was available."
+            ),
+        })
+        return out
+    n_unique = len(unique_valid_identifiers)
+    novel_unique = [s for s in unique_valid_identifiers if s not in train_identifiers]
     return {
         "validity_rate": float(n_valid / n_total) if n_total else 0.0,
         "dataset_validity_rate": float(n_valid / n_total) if n_total else 0.0,
         "rdkit_validity_rate": float(len(valid_smiles) / n_total) if n_total else 0.0,
-        "uniqueness_rate": float(n_unique / max(len(valid_smiles), 1)) if valid_smiles else 0.0,
+        "uniqueness_rate": float(n_unique / max(len(valid_identifiers), 1)) if valid_identifiers else 0.0,
         "novelty_rate": float(len(novel_unique) / max(n_unique, 1)) if train_graphs and n_unique else (None if not train_graphs else 0.0),
         "valid_unique_novel_rate": float(len(novel_unique) / n_total) if n_total and train_graphs else None,
         "num_valid_molecules": n_valid,

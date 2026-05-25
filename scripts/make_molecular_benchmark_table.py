@@ -58,18 +58,29 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
-def _format_metric(row: dict[str, str] | None, metric: str, *, mean_std: bool) -> str:
+def _row_min_metric_value(row: dict[str, str] | None) -> float | None:
+    if row is None:
+        return None
+    values = [_as_float(row.get(metric)) for metric, _ in METRIC_COLUMNS]
+    values = [value for value in values if value is not None]
+    return min(values) if values else None
+
+
+def _format_metric(row: dict[str, str] | None, metric: str, *, mean_std: bool, row_min: float | None) -> str:
     if row is None:
         return "--"
     value = _as_float(row.get(metric))
     if value is None:
         return "--"
+    is_row_min = row_min is not None and abs(value - row_min) <= 1e-12
     if mean_std:
         for std_key in (f"{metric}_std", f"{metric}_bootstrap_std", f"{metric}_split_std"):
             std = _as_float(row.get(std_key))
             if std is not None:
-                return f"{value:.4f} $\\pm$ {std:.4f}"
-    return f"{value:.4f}"
+                formatted = f"{value:.4f} $\\pm$ {std:.4f}"
+                return rf"\textbf{{{formatted}}}" if is_row_min else formatted
+    formatted = f"{value:.4f}"
+    return rf"\textbf{{{formatted}}}" if is_row_min else formatted
 
 
 def _find_rows(rows: list[dict[str, str]]) -> dict[tuple[str, str], dict[str, str]]:
@@ -82,14 +93,23 @@ def _find_rows(rows: list[dict[str, str]]) -> dict[tuple[str, str], dict[str, st
     return selected
 
 
-def _latex(rows_by_key: dict[tuple[str, str], dict[str, str]], datasets: list[str], models: list[str], *, mean_std: bool) -> str:
+def _latex(
+    rows_by_key: dict[tuple[str, str], dict[str, str]],
+    datasets: list[str],
+    models: list[str],
+    *,
+    mean_std: bool,
+    caption: str,
+    label: str,
+) -> str:
     body = []
     for dataset_idx, dataset in enumerate(datasets):
         if dataset_idx > 0:
             body.append(r"\midrule")
         for model in models:
             row = rows_by_key.get((dataset.lower(), model.lower()))
-            values = [_format_metric(row, metric, mean_std=mean_std) for metric, _ in METRIC_COLUMNS]
+            row_min = _row_min_metric_value(row)
+            values = [_format_metric(row, metric, mean_std=mean_std, row_min=row_min) for metric, _ in METRIC_COLUMNS]
             body.append(f"{dataset.upper():<4} & {_display_model(model):<10} & " + " & ".join(values) + r" \\")
 
     header = ["Dataset", "Model", *(title for _, title in METRIC_COLUMNS)]
@@ -97,13 +117,8 @@ def _latex(rows_by_key: dict[tuple[str, str], dict[str, str]], datasets: list[st
         [
             r"\begin{table*}[t]",
             r"\centering",
-            (
-                r"\caption{Illustrative reporting template for molecular benchmarks. Lower is better for atom-type MMD, "
-                r"bond-type MMD, feature-space MMD, and PGS-JS; higher is better for validity, uniqueness, and novelty. "
-                r"Entries are left blank until the molecular evaluation is completed. GraphGUIDE and EDP-GNN are omitted "
-                r"because their current benchmark implementations do not support attributed molecular graphs.}"
-            ),
-            r"\label{tab:molecular_benchmark_results}",
+            rf"\caption{{{caption}}}",
+            rf"\label{{{label}}}",
             r"\small",
             r"\setlength{\tabcolsep}{2.8pt}",
             r"\renewcommand{\arraystretch}{1.12}",
@@ -126,7 +141,8 @@ def main() -> None:
     parser.add_argument("--models", nargs="*", default=DEFAULT_MODELS)
     parser.add_argument("--input", type=str, default="outputs/tables/aggregated_results.csv")
     parser.add_argument("--output", type=str, default="outputs/tables/molecular_benchmark_results.tex")
-    parser.add_argument("--mean-std", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--simple-output", type=str, default=None, help="Path for the simplified table without standard deviations. Defaults to <output stem>_simple.tex.")
+    parser.add_argument("--mean-std", action=argparse.BooleanOptionalAction, default=True, help="Deprecated; the full table always includes standard deviations when available.")
     args = parser.parse_args()
 
     datasets = [d.lower() for d in (args.datasets or ([args.dataset] if args.dataset else DEFAULT_DATASETS))]
@@ -142,8 +158,29 @@ def main() -> None:
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(_latex(rows_by_key, datasets, args.models, mean_std=args.mean_std) + "\n", encoding="utf-8")
-    logger.info("Saved molecular benchmark table to %s", out)
+    simple_out = Path(args.simple_output) if args.simple_output else out.with_name(f"{out.stem}_simple{out.suffix}")
+
+    full_caption = (
+        r"Illustrative reporting template for molecular benchmarks. Lower is better for atom-type MMD, "
+        r"bond-type MMD, feature-space MMD, and PGS-JS; higher is better for validity, uniqueness, and novelty. "
+        r"Entries are left blank until the molecular evaluation is completed. GraphGUIDE and EDP-GNN are omitted "
+        r"because their current benchmark implementations do not support attributed molecular graphs."
+    )
+    simple_caption = (
+        r"Simplified molecular benchmark table without standard deviations. Lower is better for atom-type MMD, "
+        r"bond-type MMD, feature-space MMD, and PGS-JS; higher is better for validity, uniqueness, and novelty."
+    )
+    out.write_text(
+        _latex(rows_by_key, datasets, args.models, mean_std=True, caption=full_caption, label="tab:molecular_benchmark_results") + "\n",
+        encoding="utf-8",
+    )
+    simple_out.parent.mkdir(parents=True, exist_ok=True)
+    simple_out.write_text(
+        _latex(rows_by_key, datasets, args.models, mean_std=False, caption=simple_caption, label="tab:molecular_benchmark_results_simple") + "\n",
+        encoding="utf-8",
+    )
+    logger.info("Saved full molecular benchmark table to %s", out)
+    logger.info("Saved simplified molecular benchmark table to %s", simple_out)
 
 
 if __name__ == "__main__":

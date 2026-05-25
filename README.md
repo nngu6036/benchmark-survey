@@ -370,7 +370,7 @@ PYTHONPATH=src python scripts/make_molecular_benchmark_table.py \
   --models digress construct disco grum
 ```
 
-The molecular table is written to `outputs/tables/molecular_benchmark_results.tex`. Missing metric values are rendered as `--`, and GraphGUIDE/EDP-GNN are intentionally omitted from the default molecular table because the current benchmark implementations do not support attributed molecular graphs.
+The full molecular table is written to `outputs/tables/molecular_benchmark_results.tex`, and the simplified value-only version is written to `outputs/tables/molecular_benchmark_results_simple.tex`. Missing metric values are rendered as `--`, and GraphGUIDE/EDP-GNN are intentionally omitted from the default molecular table because the current benchmark implementations do not support attributed molecular graphs.
 
 Model hyperparameters used by the benchmark wrappers are summarized below. Values come from `configs/models/*.yaml`; public upstream defaults are used only where the wrapper keeps the upstream model shape.
 

@@ -86,8 +86,26 @@ def test_aggregate_results_debug_prints_individual_run_statistics(tmp_path, monk
     module.main()
 
     out = capsys.readouterr().out
-    assert "Aggregate debug: individual run statistics" in out
+    assert "Aggregate debug: statistics used for aggregation" in out
     assert "qm9 / digress / demo" in out
-    assert "run_000: runtime_seconds=1, run_id=0, score=1" in out
-    assert "run_001: runtime_seconds=1, run_id=1, score=3" in out
+    assert "aggregation input: 2 individual run rows" in out
+    assert "run_000: score=1" in out
+    assert "run_001: score=3" in out
+    assert "runtime_seconds" not in out
+    assert "run_id=0" not in out
     assert "score_mean=2, score_std=1" in out
+
+
+def test_aggregate_results_debug_reports_existing_aggregate_when_used(tmp_path, monkeypatch, capsys):
+    module = _load_script_module()
+    monkeypatch.chdir(tmp_path)
+    _write_metric(tmp_path / "outputs/metrics/qm9/digress/run_000/demo.json", run_id=0, score=1.0)
+    _write_metric(tmp_path / "outputs/metrics/qm9/digress/demo.aggregate.json", run_id=None, score=9.0, aggregate=True)
+
+    monkeypatch.setattr(sys, "argv", ["aggregate_results.py", "--debug"])
+    module.main()
+
+    out = capsys.readouterr().out
+    assert "aggregation input: existing aggregate row" in out
+    assert "aggregate: score=9" in out
+    assert "run_000: score=1" not in out

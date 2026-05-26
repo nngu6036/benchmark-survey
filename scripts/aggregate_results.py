@@ -31,14 +31,6 @@ EXCLUDE_FROM_METRIC_AGG = {
     "run_id",
 }
 
-DEBUG_EXCLUDE_COLUMNS = {
-    "dataset",
-    "model",
-    "metric_family",
-    "source_file",
-    "is_aggregate",
-}
-
 
 def _flatten_results(obj: dict[str, Any]) -> dict[str, Any]:
     protocol = obj.get("protocol", {}) or {}
@@ -186,14 +178,12 @@ def _make_wide(selected_df: pd.DataFrame) -> pd.DataFrame:
 def _debug_metric_columns(df: pd.DataFrame) -> list[str]:
     columns = []
     for col in df.columns:
-        if col in DEBUG_EXCLUDE_COLUMNS or col.endswith("_std"):
+        if col in EXCLUDE_FROM_METRIC_AGG or col.endswith("_std"):
             continue
         values = df[col].dropna()
         if values.empty:
             continue
-        if col in {"run_id", "seed", "base_seed", "runtime_seconds"}:
-            columns.append(col)
-        elif _is_numeric_series(values):
+        if _is_numeric_series(values):
             columns.append(col)
     return columns
 
@@ -212,18 +202,31 @@ def _format_debug_value(value: Any) -> str:
 
 
 def _print_debug_run_statistics(long_df: pd.DataFrame, selected_df: pd.DataFrame) -> None:
-    print("Aggregate debug: individual run statistics")
+    print("Aggregate debug: statistics used for aggregation")
     for (dataset, model, metric_family), group in long_df.groupby(["dataset", "model", "metric_family"], dropna=False):
         print("")
         print(f"{dataset} / {model} / {metric_family}")
         metric_cols = _debug_metric_columns(group)
         individual_rows = group[~group["is_aggregate"].fillna(False).astype(bool)] if "is_aggregate" in group.columns else group
         aggregate_rows = group[group["is_aggregate"].fillna(False).astype(bool)] if "is_aggregate" in group.columns else pd.DataFrame()
+        selected_match = selected_df[
+            (selected_df["dataset"].astype(str) == str(dataset))
+            & (selected_df["model"].astype(str) == str(model))
+            & (selected_df["metric_family"].astype(str) == str(metric_family))
+        ]
+        selected_row = selected_match.iloc[0] if not selected_match.empty else None
+        selected_is_existing_aggregate = bool(selected_row is not None and selected_row.get("is_aggregate", False) and not aggregate_rows.empty)
 
-        if individual_rows.empty:
-            print("  individual runs: none")
+        if selected_is_existing_aggregate:
+            print("  aggregation input: existing aggregate row")
+            values = [f"{col}={_format_debug_value(selected_row.get(col))}" for col in metric_cols]
+            print("    aggregate: " + (", ".join(values) if values else "no aggregated numeric metrics"))
+            if selected_row.get("source_file"):
+                print(f"      source: {selected_row['source_file']}")
+        elif individual_rows.empty:
+            print("  aggregation input: no individual run rows")
         else:
-            print(f"  individual runs: {len(individual_rows)}")
+            print(f"  aggregation input: {len(individual_rows)} individual run rows")
             sort_cols = [col for col in ["run_id", "seed"] if col in individual_rows.columns]
             sorted_rows = individual_rows.sort_values(sort_cols) if sort_cols else individual_rows
             for _, row in sorted_rows.iterrows():
@@ -231,34 +234,18 @@ def _print_debug_run_statistics(long_df: pd.DataFrame, selected_df: pd.DataFrame
                 run_label = "run_legacy" if pd.isna(run_id) else f"run_{int(run_id):03d}"
                 values = [f"{col}={_format_debug_value(row.get(col))}" for col in metric_cols]
                 source = row.get("source_file")
-                print(f"    {run_label}: " + (", ".join(values) if values else "no numeric metrics"))
+                print(f"    {run_label}: " + (", ".join(values) if values else "no aggregated numeric metrics"))
                 if source:
                     print(f"      source: {source}")
 
-        if not aggregate_rows.empty:
-            print(f"  existing aggregate rows: {len(aggregate_rows)}")
-            for _, row in aggregate_rows.iterrows():
-                values = [f"{col}={_format_debug_value(row.get(col))}" for col in metric_cols]
-                print("    aggregate: " + (", ".join(values) if values else "no numeric metrics"))
-                if row.get("source_file"):
-                    print(f"      source: {row['source_file']}")
-
-        selected_match = selected_df[
-            (selected_df["dataset"].astype(str) == str(dataset))
-            & (selected_df["model"].astype(str) == str(model))
-            & (selected_df["metric_family"].astype(str) == str(metric_family))
-        ]
-        if not selected_match.empty:
-            row = selected_match.iloc[0]
+        if selected_row is not None:
             summary_parts = []
             for col in metric_cols:
-                if col in {"run_id", "seed", "base_seed"}:
-                    continue
-                if col in row.index and not pd.isna(row.get(col)):
-                    part = f"{col}_mean={_format_debug_value(row.get(col))}"
+                if col in selected_row.index and not pd.isna(selected_row.get(col)):
+                    part = f"{col}_mean={_format_debug_value(selected_row.get(col))}"
                     std_col = f"{col}_std"
-                    if std_col in row.index and not pd.isna(row.get(std_col)):
-                        part += f", {std_col}={_format_debug_value(row.get(std_col))}"
+                    if std_col in selected_row.index and not pd.isna(selected_row.get(std_col)):
+                        part += f", {std_col}={_format_debug_value(selected_row.get(std_col))}"
                     summary_parts.append(part)
             if summary_parts:
                 print("  selected aggregate:")

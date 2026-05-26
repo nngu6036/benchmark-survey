@@ -395,6 +395,8 @@ PYTHONPATH=src python scripts/make_latex_tables.py \
   --models digress construct disco grum
 ```
 
+Add `--debug` to `aggregate_results.py` to print the individual per-run metric rows and the selected aggregate mean/std before the CSV files are written.
+
 To generate only the molecular reporting table, run:
 
 ```bash

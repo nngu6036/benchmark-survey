@@ -74,3 +74,20 @@ def test_aggregate_results_filters_requested_datasets_and_models(tmp_path, monke
     assert "qm9,grum" in wide
     assert "qm9,digress" not in wide
     assert "zinc,grum" not in wide
+
+
+def test_aggregate_results_debug_prints_individual_run_statistics(tmp_path, monkeypatch, capsys):
+    module = _load_script_module()
+    monkeypatch.chdir(tmp_path)
+    _write_metric(tmp_path / "outputs/metrics/qm9/digress/run_000/demo.json", run_id=0, score=1.0)
+    _write_metric(tmp_path / "outputs/metrics/qm9/digress/run_001/demo.json", run_id=1, score=3.0)
+
+    monkeypatch.setattr(sys, "argv", ["aggregate_results.py", "--run-ids", "0", "1", "--debug"])
+    module.main()
+
+    out = capsys.readouterr().out
+    assert "Aggregate debug: individual run statistics" in out
+    assert "qm9 / digress / demo" in out
+    assert "run_000: runtime_seconds=1, run_id=0, score=1" in out
+    assert "run_001: runtime_seconds=1, run_id=1, score=3" in out
+    assert "score_mean=2, score_std=1" in out

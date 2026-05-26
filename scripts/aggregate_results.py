@@ -31,6 +31,14 @@ EXCLUDE_FROM_METRIC_AGG = {
     "run_id",
 }
 
+DEBUG_EXCLUDE_COLUMNS = {
+    "dataset",
+    "model",
+    "metric_family",
+    "source_file",
+    "is_aggregate",
+}
+
 
 def _flatten_results(obj: dict[str, Any]) -> dict[str, Any]:
     protocol = obj.get("protocol", {}) or {}
@@ -175,6 +183,89 @@ def _make_wide(selected_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(merged_rows).sort_values(["dataset", "model"])
 
 
+def _debug_metric_columns(df: pd.DataFrame) -> list[str]:
+    columns = []
+    for col in df.columns:
+        if col in DEBUG_EXCLUDE_COLUMNS or col.endswith("_std"):
+            continue
+        values = df[col].dropna()
+        if values.empty:
+            continue
+        if col in {"run_id", "seed", "base_seed", "runtime_seconds"}:
+            columns.append(col)
+        elif _is_numeric_series(values):
+            columns.append(col)
+    return columns
+
+
+def _format_debug_value(value: Any) -> str:
+    if value is None:
+        return "--"
+    try:
+        if pd.isna(value):
+            return "--"
+    except Exception:
+        pass
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)
+
+
+def _print_debug_run_statistics(long_df: pd.DataFrame, selected_df: pd.DataFrame) -> None:
+    print("Aggregate debug: individual run statistics")
+    for (dataset, model, metric_family), group in long_df.groupby(["dataset", "model", "metric_family"], dropna=False):
+        print("")
+        print(f"{dataset} / {model} / {metric_family}")
+        metric_cols = _debug_metric_columns(group)
+        individual_rows = group[~group["is_aggregate"].fillna(False).astype(bool)] if "is_aggregate" in group.columns else group
+        aggregate_rows = group[group["is_aggregate"].fillna(False).astype(bool)] if "is_aggregate" in group.columns else pd.DataFrame()
+
+        if individual_rows.empty:
+            print("  individual runs: none")
+        else:
+            print(f"  individual runs: {len(individual_rows)}")
+            sort_cols = [col for col in ["run_id", "seed"] if col in individual_rows.columns]
+            sorted_rows = individual_rows.sort_values(sort_cols) if sort_cols else individual_rows
+            for _, row in sorted_rows.iterrows():
+                run_id = row.get("run_id")
+                run_label = "run_legacy" if pd.isna(run_id) else f"run_{int(run_id):03d}"
+                values = [f"{col}={_format_debug_value(row.get(col))}" for col in metric_cols]
+                source = row.get("source_file")
+                print(f"    {run_label}: " + (", ".join(values) if values else "no numeric metrics"))
+                if source:
+                    print(f"      source: {source}")
+
+        if not aggregate_rows.empty:
+            print(f"  existing aggregate rows: {len(aggregate_rows)}")
+            for _, row in aggregate_rows.iterrows():
+                values = [f"{col}={_format_debug_value(row.get(col))}" for col in metric_cols]
+                print("    aggregate: " + (", ".join(values) if values else "no numeric metrics"))
+                if row.get("source_file"):
+                    print(f"      source: {row['source_file']}")
+
+        selected_match = selected_df[
+            (selected_df["dataset"].astype(str) == str(dataset))
+            & (selected_df["model"].astype(str) == str(model))
+            & (selected_df["metric_family"].astype(str) == str(metric_family))
+        ]
+        if not selected_match.empty:
+            row = selected_match.iloc[0]
+            summary_parts = []
+            for col in metric_cols:
+                if col in {"run_id", "seed", "base_seed"}:
+                    continue
+                if col in row.index and not pd.isna(row.get(col)):
+                    part = f"{col}_mean={_format_debug_value(row.get(col))}"
+                    std_col = f"{col}_std"
+                    if std_col in row.index and not pd.isna(row.get(std_col)):
+                        part += f", {std_col}={_format_debug_value(row.get(std_col))}"
+                    summary_parts.append(part)
+            if summary_parts:
+                print("  selected aggregate:")
+                for part in summary_parts:
+                    print(f"    {part}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Aggregate metric JSON outputs into long, metric-family, and wide CSV tables.")
     parser.add_argument("--metric-dir", type=str, default="outputs/metrics")
@@ -182,6 +273,7 @@ def main() -> None:
     parser.add_argument("--datasets", nargs="+", choices=available_datasets(), default=None, help="Datasets to include. Defaults to all discovered datasets.")
     parser.add_argument("--models", nargs="+", choices=available_models(), default=None, help="Models to include. Defaults to all discovered models.")
     parser.add_argument("--run-ids", type=int, nargs="+", default=None, help="Only average these run ids. Existing aggregate JSONs are ignored when this is set.")
+    parser.add_argument("--debug", action="store_true", help="Print individual per-run statistics used for aggregation.")
     args = parser.parse_args()
 
     metric_dir = Path(args.metric_dir)
@@ -227,6 +319,8 @@ def main() -> None:
     long_df.to_csv(long_out, index=False)
 
     selected_df = _select_or_build_aggregate_rows(long_df, prefer_existing_aggregates=requested_run_ids is None)
+    if args.debug:
+        _print_debug_run_statistics(long_df, selected_df)
     selected_out = output_dir / "aggregated_results_by_metric_family.csv"
     selected_df.to_csv(selected_out, index=False)
 

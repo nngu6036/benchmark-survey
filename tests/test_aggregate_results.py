@@ -94,6 +94,8 @@ def test_aggregate_results_debug_prints_individual_run_statistics(tmp_path, monk
     assert "runtime_seconds" not in out
     assert "run_id=0" not in out
     assert "score_mean=2, score_std=1" in out
+    assert "high relative std (>20% of average):" in out
+    assert "score: mean=2, std=1, std/mean=50.0%" in out
 
 
 def test_aggregate_results_debug_reports_existing_aggregate_when_used(tmp_path, monkeypatch, capsys):
@@ -109,3 +111,30 @@ def test_aggregate_results_debug_reports_existing_aggregate_when_used(tmp_path, 
     assert "aggregation input: existing aggregate row" in out
     assert "aggregate: score=9" in out
     assert "run_000: score=1" not in out
+
+
+def test_aggregate_results_debug_reports_high_std_from_existing_aggregate(tmp_path, monkeypatch, capsys):
+    module = _load_script_module()
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "outputs/metrics/qm9/digress/demo.aggregate.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "dataset": "qm9",
+                "model": "digress",
+                "metric_family": "demo",
+                "is_aggregate": True,
+                "results": {"score": 10.0, "score_std": 3.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(sys, "argv", ["aggregate_results.py", "--debug"])
+    module.main()
+
+    out = capsys.readouterr().out
+    assert "aggregation input: existing aggregate row" in out
+    assert "high relative std (>20% of average):" in out
+    assert "score: mean=10, std=3, std/mean=30.0%" in out

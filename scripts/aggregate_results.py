@@ -201,6 +201,21 @@ def _format_debug_value(value: Any) -> str:
     return str(value)
 
 
+def _relative_std_exceeds_threshold(mean: Any, std: Any, *, threshold: float = 0.20) -> tuple[bool, float | None]:
+    try:
+        mean_value = float(mean)
+        std_value = float(std)
+    except (TypeError, ValueError):
+        return False, None
+    if np.isnan(mean_value) or np.isnan(std_value):
+        return False, None
+    denominator = abs(mean_value)
+    if denominator == 0:
+        return std_value > 0, None
+    ratio = std_value / denominator
+    return ratio > threshold, ratio
+
+
 def _print_debug_run_statistics(long_df: pd.DataFrame, selected_df: pd.DataFrame) -> None:
     print("Aggregate debug: statistics used for aggregation")
     for (dataset, model, metric_family), group in long_df.groupby(["dataset", "model", "metric_family"], dropna=False):
@@ -240,16 +255,28 @@ def _print_debug_run_statistics(long_df: pd.DataFrame, selected_df: pd.DataFrame
 
         if selected_row is not None:
             summary_parts = []
+            high_relative_std_parts = []
             for col in metric_cols:
                 if col in selected_row.index and not pd.isna(selected_row.get(col)):
                     part = f"{col}_mean={_format_debug_value(selected_row.get(col))}"
                     std_col = f"{col}_std"
                     if std_col in selected_row.index and not pd.isna(selected_row.get(std_col)):
                         part += f", {std_col}={_format_debug_value(selected_row.get(std_col))}"
+                        exceeds, ratio = _relative_std_exceeds_threshold(selected_row.get(col), selected_row.get(std_col))
+                        if exceeds:
+                            ratio_text = "undefined" if ratio is None else f"{ratio:.1%}"
+                            high_relative_std_parts.append(
+                                f"{col}: mean={_format_debug_value(selected_row.get(col))}, "
+                                f"std={_format_debug_value(selected_row.get(std_col))}, std/mean={ratio_text}"
+                            )
                     summary_parts.append(part)
             if summary_parts:
                 print("  selected aggregate:")
                 for part in summary_parts:
+                    print(f"    {part}")
+            if high_relative_std_parts:
+                print("  high relative std (>20% of average):")
+                for part in high_relative_std_parts:
                     print(f"    {part}")
 
 

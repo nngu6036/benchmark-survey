@@ -239,14 +239,14 @@ def _print_debug_run_statistics(long_df: pd.DataFrame, selected_df: pd.DataFrame
             if selected_row.get("source_file"):
                 print(f"      source: {selected_row['source_file']}")
         elif individual_rows.empty:
-            print("  aggregation input: no individual run rows")
+            print("  contributing run ids: none")
         else:
-            print(f"  aggregation input: {len(individual_rows)} individual run rows")
+            print(f"  contributing run ids: {len(individual_rows)}")
             sort_cols = [col for col in ["run_id", "seed"] if col in individual_rows.columns]
             sorted_rows = individual_rows.sort_values(sort_cols) if sort_cols else individual_rows
             for _, row in sorted_rows.iterrows():
                 run_id = row.get("run_id")
-                run_label = "run_legacy" if pd.isna(run_id) else f"run_{int(run_id):03d}"
+                run_label = "run_id=legacy/default" if pd.isna(run_id) else f"run_id={int(run_id)}"
                 values = [f"{col}={_format_debug_value(row.get(col))}" for col in metric_cols]
                 source = row.get("source_file")
                 print(f"    {run_label}: " + (", ".join(values) if values else "no aggregated numeric metrics"))

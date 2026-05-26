@@ -88,11 +88,11 @@ def test_aggregate_results_debug_prints_individual_run_statistics(tmp_path, monk
     out = capsys.readouterr().out
     assert "Aggregate debug: statistics used for aggregation" in out
     assert "qm9 / digress / demo" in out
-    assert "aggregation input: 2 individual run rows" in out
-    assert "run_000: score=1" in out
-    assert "run_001: score=3" in out
+    assert "contributing run ids: 2" in out
+    assert "run_id=0: score=1" in out
+    assert "run_id=1: score=3" in out
     assert "runtime_seconds" not in out
-    assert "run_id=0" not in out
+    assert "run_id=0: score=1" in out
     assert "score_mean=2, score_std=1" in out
     assert "high relative std (>20% of average):" in out
     assert "score: mean=2, std=1, std/mean=50.0%" in out
@@ -110,7 +110,7 @@ def test_aggregate_results_debug_reports_existing_aggregate_when_used(tmp_path, 
     out = capsys.readouterr().out
     assert "aggregation input: existing aggregate row" in out
     assert "aggregate: score=9" in out
-    assert "run_000: score=1" not in out
+    assert "run_id=0: score=1" not in out
 
 
 def test_aggregate_results_debug_reports_high_std_from_existing_aggregate(tmp_path, monkeypatch, capsys):

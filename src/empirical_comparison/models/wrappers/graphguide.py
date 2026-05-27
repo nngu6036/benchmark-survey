@@ -235,6 +235,21 @@ class GraphGUIDEWrapper(BaseGenerator):
         nx.set_node_attributes(g, features, "feats")
         return g
 
+    @staticmethod
+    def _graph_for_pyg_conversion(graph: nx.Graph) -> nx.Graph:
+        """Keep only tensors PyG should consume.
+
+        NetworkX generators such as stochastic_block_model attach graph-level
+        metadata like partitions as sets.  torch_geometric.from_networkx tries
+        to convert every graph/node/edge attribute into tensors, so nonnumeric
+        metadata must be dropped before conversion.
+        """
+        clean = nx.Graph()
+        for node, data in graph.nodes(data=True):
+            clean.add_node(node, feats=np.asarray(data["feats"], dtype=np.float32))
+        clean.add_edges_from(graph.edges())
+        return clean
+
     def _infer_input_dim(self, graphs: Iterable[nx.Graph]) -> int:
         for graph in graphs:
             if graph.number_of_nodes() == 0:
@@ -246,7 +261,7 @@ class GraphGUIDEWrapper(BaseGenerator):
     def _to_pyg_data(self, graph: nx.Graph):
         self._import_graphguide_modules()
         g = self._prepare_graph_features(graph)
-        data = self.pyg_from_networkx(g, group_node_attrs=["feats"])
+        data = self.pyg_from_networkx(self._graph_for_pyg_conversion(g), group_node_attrs=["feats"])
         # from_networkx creates data.x when group_node_attrs is set.  Make sure
         # edge_index exists and is sorted even for edgeless graphs.
         if not hasattr(data, "edge_index") or data.edge_index is None:

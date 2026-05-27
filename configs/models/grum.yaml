@@ -21,6 +21,9 @@ base_config: null
 # which drops true isolated nodes. The benchmark wrapper uses explicit masks instead.
 preserve_isolated_nodes: true
 drop_isolates_on_output: false
+# null pads to the largest graph in the training split. Set a larger integer
+# only when you intentionally want extra padded nodes; attention memory scales
+# quadratically with this value.
 max_node_num: null
 batch_size: 32
 num_workers: 0

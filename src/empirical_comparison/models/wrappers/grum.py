@@ -647,12 +647,9 @@ class GruMWrapper:
 
         max_nodes_in_data = max(g.number_of_nodes() for g in train_graphs)
         cfg["data"]["data"] = self.dataset_name
-        base_max_nodes = int(cfg["data"].get("max_node_num", max_nodes_in_data))
-        if self.config.get("base_config") is None and self.dataset_name not in {"sbm", "planar", "proteins"}:
-            base_max_nodes = max_nodes_in_data
         explicit_max_nodes = self.config.get("max_node_num")
         if explicit_max_nodes is None:
-            cfg["data"]["max_node_num"] = max(base_max_nodes, max_nodes_in_data)
+            cfg["data"]["max_node_num"] = max_nodes_in_data
         else:
             cfg["data"]["max_node_num"] = int(explicit_max_nodes)
         if cfg["data"]["max_node_num"] < max_nodes_in_data:

@@ -81,3 +81,75 @@ def test_make_latex_tables_filters_requested_datasets_and_models(tmp_path, monke
     assert "Planar & GruM" in latex
     assert "Planar & ConStruct" not in latex
     assert "SBM & GruM" not in latex
+
+
+def test_make_latex_tables_accepts_singular_dataset_and_model(tmp_path, monkeypatch):
+    module = _load_script_module()
+    csv_path = tmp_path / "aggregated_results.csv"
+    out_path = tmp_path / "tables.tex"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "dataset,model,degree_mmd,clustering_mmd,orbit_mmd,spectral_mmd,learned_feature_mmd,pgs_js_distance",
+                "planar,construct,0.0605,1.0633,1.5063,0.0519,1.4007,0.9925",
+                "planar,grum,0.0034,0.0722,0.4487,0.0038,0.4312,0.4005",
+                "sbm,grum,0.0206,0.4554,0.5546,0.0849,0.6172,0.8396",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["make_latex_tables.py", "--input", str(csv_path), "--output", str(out_path), "--dataset", "planar", "--model", "grum"],
+    )
+    module.main()
+
+    latex = out_path.read_text(encoding="utf-8")
+    assert "Planar & GruM" in latex
+    assert "Planar & ConStruct" not in latex
+    assert "SBM & GruM" not in latex
+
+
+def test_make_latex_tables_writes_full_and_simple_outputs(tmp_path, monkeypatch):
+    module = _load_script_module()
+    csv_path = tmp_path / "aggregated_results.csv"
+    full_out = tmp_path / "tables.tex"
+    simple_out = tmp_path / "tables_simple.tex"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "dataset,model,degree_mmd,degree_mmd_std,clustering_mmd,orbit_mmd,spectral_mmd,learned_feature_mmd,pgs_js_distance",
+                "planar,grum,0.0034,0.0002,0.0722,0.4487,0.0038,0.4312,0.4005",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "make_latex_tables.py",
+            "--input",
+            str(csv_path),
+            "--output",
+            str(full_out),
+            "--simple-output",
+            str(simple_out),
+            "--dataset",
+            "planar",
+            "--model",
+            "grum",
+        ],
+    )
+    module.main()
+
+    full = full_out.read_text(encoding="utf-8")
+    simple = simple_out.read_text(encoding="utf-8")
+    assert r"0.0034 $\pm$ 0.0002" in full
+    assert r"0.0034 $\pm$ 0.0002" not in simple
+    assert r"\label{tab:synthetic_benchmark_results_simple}" in simple

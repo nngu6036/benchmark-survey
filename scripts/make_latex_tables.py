@@ -184,13 +184,44 @@ def _render_table(
     )
 
 
+def _build_latex_tables(synthetic_df: pd.DataFrame, qm9_df: pd.DataFrame, *, mean_std: bool, label_suffix: str = "") -> str:
+    tables = [
+        _render_table(
+            synthetic_df,
+            metric_columns=SYNTHETIC_COLUMNS,
+            caption="Illustrative comparison on synthetic graph benchmarks. Lower is better for MMD, feature-space MMD, and PGS-JS.",
+            label=f"tab:synthetic_benchmark_results{label_suffix}",
+            include_dataset=True,
+            mean_std=mean_std,
+            tabcolsep="3.0pt",
+            midrule_on_dataset_change=True,
+            bold_best=True,
+        ),
+        _render_table(
+            qm9_df,
+            metric_columns=QM9_COLUMNS,
+            caption=(
+                "Illustrative comparison on molecular graph benchmarks. Higher is better for validity, uniqueness, and novelty; "
+                "lower is better for MMD, feature-space MMD, and PGS-JS."
+            ),
+            label=f"tab:qm9_benchmark_results{label_suffix}",
+            include_dataset=True,
+            mean_std=mean_std,
+        ),
+    ]
+    return "\n\n".join(table for table in tables if table)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create LaTeX benchmark tables from aggregated benchmark CSV.")
     parser.add_argument("--input", type=str, default="outputs/tables/aggregated_results.csv")
     parser.add_argument("--output", type=str, default="outputs/tables/aggregated_results.tex")
+    parser.add_argument("--simple-output", type=str, default=None, help="Path for the simplified table without standard deviations. Defaults to <output stem>_simple.tex.")
+    parser.add_argument("--dataset", choices=available_datasets(), default=None, help="Single dataset to include.")
+    parser.add_argument("--model", choices=available_models(), default=None, help="Single model to include.")
     parser.add_argument("--datasets", nargs="+", choices=available_datasets(), default=None, help="Datasets to include. Defaults to all supported rows in the input CSV.")
     parser.add_argument("--models", nargs="+", choices=available_models(), default=None, help="Models to include. Defaults to all models in the input CSV.")
-    parser.add_argument("--mean-std", action=argparse.BooleanOptionalAction, default=False, help="Render metric cells as mean +/- std when std columns are available.")
+    parser.add_argument("--mean-std", action=argparse.BooleanOptionalAction, default=True, help="Deprecated; the full table always includes standard deviations when available.")
     args = parser.parse_args()
 
     csv_path = Path(args.input)
@@ -204,42 +235,21 @@ def main() -> None:
 
     df["dataset_key"] = df["dataset"].astype(str).str.lower()
     df["model_key"] = df["model"].astype(str).str.lower()
-    if args.datasets is not None:
-        dataset_filter = {dataset.lower() for dataset in args.datasets}
+    datasets = [args.dataset] if args.dataset else args.datasets
+    models = [args.model] if args.model else args.models
+    if datasets is not None:
+        dataset_filter = {dataset.lower() for dataset in datasets}
         df = df[df["dataset_key"].isin(dataset_filter)]
-    if args.models is not None:
-        model_filter = {model.lower() for model in args.models}
+    if models is not None:
+        model_filter = {model.lower() for model in models}
         df = df[df["model_key"].isin(model_filter)]
 
     synthetic_df = _ordered_rows(df[df["dataset_key"].isin(SYNTHETIC_DATASETS)].drop(columns=["dataset_key"]))
     qm9_df = _ordered_rows(df[df["dataset_key"].eq("qm9")].drop(columns=["dataset_key"]), qm9=True)
 
-    tables = [
-        _render_table(
-            synthetic_df,
-            metric_columns=SYNTHETIC_COLUMNS,
-            caption="Illustrative comparison on synthetic graph benchmarks. Lower is better for MMD, feature-space MMD, and PGS-JS.",
-            label="tab:synthetic_benchmark_results",
-            include_dataset=True,
-            mean_std=args.mean_std,
-            tabcolsep="3.0pt",
-            midrule_on_dataset_change=True,
-            bold_best=True,
-        ),
-        _render_table(
-            qm9_df,
-            metric_columns=QM9_COLUMNS,
-            caption=(
-                "Illustrative comparison on molecular graph benchmarks. Higher is better for validity, uniqueness, and novelty; "
-                "lower is better for MMD, feature-space MMD, and PGS-JS."
-            ),
-            label="tab:qm9_benchmark_results",
-            include_dataset=True,
-            mean_std=args.mean_std,
-        ),
-    ]
-    latex = "\n\n".join(table for table in tables if table)
-    if not latex:
+    full_latex = _build_latex_tables(synthetic_df, qm9_df, mean_std=True)
+    simple_latex = _build_latex_tables(synthetic_df, qm9_df, mean_std=False, label_suffix="_simple")
+    if not full_latex and not simple_latex:
         raise ValueError("No synthetic or QM9 rows found in aggregated results.")
 
     preamble = (
@@ -248,8 +258,13 @@ def main() -> None:
     )
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(preamble + latex + "\n", encoding="utf-8")
-    logger.info("Saved LaTeX table to %s", out)
+    out.write_text(preamble + full_latex + "\n", encoding="utf-8")
+
+    simple_out = Path(args.simple_output) if args.simple_output else out.with_name(f"{out.stem}_simple{out.suffix}")
+    simple_out.parent.mkdir(parents=True, exist_ok=True)
+    simple_out.write_text(preamble + simple_latex + "\n", encoding="utf-8")
+    logger.info("Saved full LaTeX table to %s", out)
+    logger.info("Saved simplified LaTeX table to %s", simple_out)
 
 
 if __name__ == "__main__":

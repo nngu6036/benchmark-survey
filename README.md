@@ -395,6 +395,10 @@ PYTHONPATH=src python scripts/make_latex_tables.py \
   --models digress construct disco grum
 ```
 
+For a single LaTeX table row subset, use `--dataset` and `--model` with `make_latex_tables.py`.
+
+`make_latex_tables.py` writes a full table to `outputs/tables/aggregated_results.tex` and a simplified value-only table to `outputs/tables/aggregated_results_simple.tex`.
+
 To generate only the molecular reporting table, run:
 
 ```bash

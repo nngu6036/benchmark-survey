@@ -364,8 +364,11 @@ Training and sampling metadata include hardware, runtime, normalized sampling ti
 ```bash
 PYTHONPATH=src python scripts/make_compute_budget_table.py \
   --datasets planar sbm \
-  --models graphguide digress construct edp_gnn disco grum
+  --models graphguide digress construct edp_gnn disco grum \
+  --run-ids 0 1 2
 ```
+
+For a single compute-budget row, use `--dataset` and `--model`. `make_compute_budget_table.py` reads training metadata from `outputs/runs/<dataset>/<model>/.../train_metadata.json` and sampling metadata from `outputs/samples/<dataset>/<model>/...metadata.json`; it does not read `outputs/metrics`. Add `--debug-sources` to log the exact metadata JSON files used.
 
 To inspect which run ids exist and whether training/sampling completed, run:
 

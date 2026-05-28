@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+from collections import Counter
 import json
 import math
 import os
 import pickle
 import random
+import re
 import sys
 import types
 from dataclasses import dataclass
@@ -185,14 +187,25 @@ class GruMWrapper:
 
     supports_training = True
     supports_sampling = True
-    supports_node_features = False
-    supports_edge_features = False
+    supports_node_features = True
+    supports_edge_features = True
+    supports_node_labels = True
+    supports_edge_labels = True
     supports_constraints = False
     supports_variable_size = True
     supports_featureless_graphs = True
 
     _QM9_VALENCE_BY_LABEL = {0: 1, 1: 4, 2: 3, 3: 2, 4: 1}
     _QM9_DEFAULT_LABEL_PROBS = {0: 0.45, 1: 0.35, 2: 0.06, 3: 0.12, 4: 0.02}
+
+    # Upstream GruM_2D molecular sampler uses the following atom vocabularies.
+    # These are used only when a benchmark label vocabulary can be decoded to
+    # atomic numbers, or when the user explicitly requests the upstream compact
+    # molecule vocabulary.  For PyG ZINC category ids, do not guess a mapping.
+    _QM9_ATOMIC_NUMBERS = [1, 6, 7, 8, 9]
+    _GRUM_QM9_ATOMIC_NUMBERS = [6, 7, 8, 9]
+    _GRUM_ZINC_ATOMIC_NUMBERS = [6, 7, 8, 9, 15, 16, 17, 35, 53]
+    _COMMON_MAX_VALENCE = {1: 1, 6: 4, 7: 3, 8: 2, 9: 1, 15: 5, 16: 6, 17: 1, 35: 1, 53: 1}
 
     def __init__(self, config: Dict[str, Any]):
         self.config: Dict[str, Any] = dict(config or {})
@@ -527,11 +540,17 @@ class GruMWrapper:
             masks = self._sample_node_masks(current_bs, max_node_num, seed + len(graphs)).to(self._device())
             x, adj = self._sample_batch(model, config, masks, feature_dim)
             before = len(graphs)
-            graphs.extend(self._adjs_to_graphs(adj, masks))
+            if self._uses_native_molecular_model(config):
+                graphs.extend(self._molecular_outputs_to_graphs(x, adj, masks, config))
+            else:
+                graphs.extend(self._adjs_to_graphs(adj, masks))
             update_progress(progress_callback, min(len(graphs), num_graphs) - min(before, num_graphs))
         graphs = graphs[:num_graphs]
-        if self.dataset_name == "qm9" and bool(self._cfg("qm9_constrained_postprocess", True)):
-            graphs = self._qm9_constrained_postprocess_graphs(graphs, seed=seed)
+        if self._is_molecular_dataset() and not self._uses_native_molecular_model(config):
+            if bool(self._cfg(f"{self.dataset_name}_constrained_postprocess", self._cfg("molecular_constrained_postprocess", True))):
+                graphs = self._molecular_constrained_postprocess_graphs(graphs, seed=seed)
+        elif self._uses_native_molecular_model(config) and bool(self._cfg("molecular_prune_invalid_valence", True)):
+            graphs = self._prune_molecular_graphs_to_valence(graphs)
         assert_finite_graphs(graphs, context=f"GruM sample output dataset={self.dataset_name}")
         return graphs
 
@@ -545,9 +564,37 @@ class GruMWrapper:
             return repo_root / "GruM"
         return repo_root
 
+    def _is_molecular_dataset(self) -> bool:
+        return self.dataset_name in {"qm9", "zinc", "zinc250k"}
+
+    def _molecular_mode(self) -> str:
+        # ``native`` trains GruM's molecular GraphTransformer_Mol path.
+        # ``structure`` preserves the historical adjacency-only wrapper and then
+        # applies constrained molecule labels after sampling.
+        mode = str(self._cfg("molecular_mode", "native" if self._is_molecular_dataset() else "structure")).lower()
+        if mode in {"true", "1", "yes", "mol", "molecule", "molecular"}:
+            return "native"
+        if mode in {"false", "0", "no", "generic", "graph"}:
+            return "structure"
+        if mode not in {"native", "structure"}:
+            raise ValueError(f"Unknown GruM molecular_mode={mode!r}; use 'native' or 'structure'.")
+        return mode
+
+    def _uses_native_molecular_model(self, config: Optional[_EasyDict] = None) -> bool:
+        if config is not None:
+            try:
+                return "mol" in str(config.model.type).lower()
+            except Exception:
+                return False
+        return self._is_molecular_dataset() and self._molecular_mode() == "native"
+
     def _default_base_config(self, dataset: str) -> str:
         if dataset in {"sbm", "planar", "proteins"}:
             return dataset
+        if dataset == "qm9":
+            return "qm9"
+        if dataset in {"zinc", "zinc250k"}:
+            return "zinc250k"
         return "planar"
 
     def _format_path(self, value: str | os.PathLike[str]) -> Path:
@@ -647,9 +694,12 @@ class GruMWrapper:
 
         max_nodes_in_data = max(g.number_of_nodes() for g in train_graphs)
         cfg["data"]["data"] = self.dataset_name
+        base_max_nodes = int(cfg["data"].get("max_node_num", max_nodes_in_data))
+        if self.config.get("base_config") is None and self.dataset_name not in {"sbm", "planar", "proteins"}:
+            base_max_nodes = max_nodes_in_data
         explicit_max_nodes = self.config.get("max_node_num")
         if explicit_max_nodes is None:
-            cfg["data"]["max_node_num"] = max_nodes_in_data
+            cfg["data"]["max_node_num"] = max(base_max_nodes, max_nodes_in_data)
         else:
             cfg["data"]["max_node_num"] = int(explicit_max_nodes)
         if cfg["data"]["max_node_num"] < max_nodes_in_data:
@@ -734,8 +784,32 @@ class GruMWrapper:
         if self.config.get("corrector_steps") is not None:
             cfg["sampler"]["n_steps"] = int(self.config["corrector_steps"])
 
+        if self._uses_native_molecular_model():
+            vocab = self._molecular_vocab(train_graphs)
+            cfg["data"].setdefault("feat", {})
+            cfg["data"]["feat"]["type"] = ["atom"]
+            cfg["data"]["feat"]["dim"] = [int(vocab["num_atom_types"])]
+            cfg["data"]["feat"]["scale"] = 1.0
+            cfg["data"]["feat"]["norm"] = False
+            cfg["data"]["max_feat_num"] = int(vocab["num_atom_types"])
+            cfg["model"]["type"] = "transformer_mol"
+            cfg["model"].setdefault("input_dims", {})
+            cfg["model"]["input_dims"]["E"] = int(self._cfg("molecular_input_edge_powers", cfg["model"]["input_dims"].get("E", 2)))
+            cfg["model"]["input_dims"]["y"] = int(cfg["model"]["input_dims"].get("y", 0))
+            cfg["model"]["adj_scale"] = float(self._cfg("adj_scale", cfg["model"].get("adj_scale", 3.0)))
+            if self.config.get("molecular_loss_type") is not None:
+                cfg["train"]["loss_type"].update(dict(self.config["molecular_loss_type"]))
+            elif bool(self._cfg("molecular_use_upstream_loss", True)):
+                cfg["train"]["loss_type"] = {"x": "default", "adj": "default"}
+            cfg.setdefault("benchmark_molecular_vocab", vocab)
+
         cfg["seed"] = int(self._cfg("seed", 0))
         config = _to_edict(cfg)
+
+        if self._uses_native_molecular_model(config):
+            # The molecular path uses one-hot atom classes directly, not eigen/degree
+            # topology features.  Dimensions were set from the training vocabulary above.
+            return config
 
         # Compute feature dimensions after masks have been defined.
         _, _, mask = self._graphs_to_adj_mask(train_graphs, int(config.data.max_node_num))
@@ -772,21 +846,42 @@ class GruMWrapper:
         if graphs is None:
             return []
         out: List[nx.Graph] = []
+        molecular = self._is_molecular_dataset()
         for g in graphs:
             if g is None:
                 continue
             h = nx.Graph()
             nodes = sorted(g.nodes())
             mapping = {node: i for i, node in enumerate(nodes)}
-            h.add_nodes_from(range(len(nodes)))
-            for node in h.nodes:
-                h.nodes[node]["feature"] = 1.0
-                h.nodes[node]["feats"] = [1.0]
-            for u, v in g.edges():
+            for node in nodes:
+                idx = mapping[node]
+                data = dict(g.nodes[node])
+                if molecular:
+                    label = self._node_label_from_data(data)
+                    payload = dict(data)
+                    payload["node_label"] = int(label)
+                    payload.setdefault("feats", [float(label)])
+                    # Preserve explicit atomic numbers when present.  The molecular
+                    # decoder can also infer them from dataset mappings.
+                    z = self._as_int_or_none(data.get("atomic_number", data.get("z", data.get("atomic_num"))))
+                    if z is not None:
+                        payload["atomic_number"] = int(z)
+                    h.add_node(idx, **payload)
+                else:
+                    h.add_node(idx, feature=1.0, feats=[1.0])
+            for u, v, data in g.edges(data=True):
                 if u not in mapping or v not in mapping:
                     continue
                 uu, vv = mapping[u], mapping[v]
-                if uu != vv:
+                if uu == vv:
+                    continue
+                if molecular:
+                    edge_type = self._edge_label_from_data(data)
+                    payload = dict(data)
+                    payload["edge_type"] = int(edge_type)
+                    payload.setdefault("edge_attr", [float(self._bond_order_from_label(edge_type))])
+                    h.add_edge(uu, vv, **payload)
+                else:
                     h.add_edge(uu, vv)
             out.append(h)
         return out
@@ -819,6 +914,8 @@ class GruMWrapper:
         return node_counts, torch.tensor(np.stack(adjs), dtype=torch.float32), torch.tensor(np.stack(masks), dtype=torch.float32)
 
     def _graphs_to_tensors(self, graphs: Sequence[nx.Graph], config: _EasyDict) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self._uses_native_molecular_model(config):
+            return self._graphs_to_molecular_tensors(graphs, config)
         _, adjs, masks = self._graphs_to_adj_mask(graphs, int(config.data.max_node_num))
         x, feat_dim = self._compute_features(adjs, masks, config.data)
         # Keep the already-computed dimensions stable, but allow this method to be
@@ -827,6 +924,255 @@ class GruMWrapper:
             config.data.feat.dim = list(feat_dim)
             config.data.max_feat_num = int(x.shape[-1])
         return x, adjs, masks
+
+    def _as_int_or_none(self, value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, (bool, np.bool_)):
+            return None
+        if isinstance(value, (int, np.integer)):
+            return int(value)
+        if isinstance(value, (float, np.floating)) and float(value).is_integer():
+            return int(value)
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            f = float(text)
+        except Exception:
+            return None
+        return int(f) if f.is_integer() else None
+
+    def _bond_order_from_label(self, value: Any) -> int:
+        val = self._as_int_or_none(value)
+        if val is None:
+            return 1
+        # Benchmark edge labels reserve 0 for dense no-edge states.  Values 1,2,3
+        # are single/double/triple.  Aromatic/category-4 labels are not natively
+        # represented by GruM_2D; map them to single bonds for conservative RDKit
+        # validity rather than producing invalid bond labels.
+        if val <= 0:
+            return 0
+        if val in {1, 2, 3}:
+            return int(val)
+        return 1
+
+    def _node_label_from_data(self, data: Mapping[str, Any]) -> int:
+        for key in ("node_label", "label", "node_type", "type", "atom_type", "atomic_number", "z"):
+            val = self._as_int_or_none(data.get(key))
+            if val is not None and val >= 0:
+                return int(val)
+        feats = data.get("feats", data.get("feature", data.get("features", None)))
+        try:
+            arr = np.asarray(feats).reshape(-1)
+            if arr.size == 1:
+                val = self._as_int_or_none(arr[0])
+                if val is not None and val >= 0:
+                    return int(val)
+            if arr.size > 1:
+                return int(np.argmax(arr))
+        except Exception:
+            pass
+        return 0
+
+    def _edge_label_from_data(self, data: Mapping[str, Any]) -> int:
+        for key in ("edge_type", "label", "edge_label", "bond_type", "type", "bond"):
+            val = self._as_int_or_none(data.get(key))
+            if val is not None:
+                return int(val)
+        attr = data.get("edge_attr", data.get("feature", data.get("features", None)))
+        try:
+            arr = np.asarray(attr).reshape(-1)
+            if arr.size == 1:
+                val = self._as_int_or_none(arr[0])
+                return 1 if val is None else int(val)
+            if arr.size > 1:
+                return int(np.argmax(arr)) + 1
+        except Exception:
+            pass
+        return 1
+
+    def _symbol_to_atomic_number(self, value: Any) -> Optional[int]:
+        text = str(value).strip()
+        if not text:
+            return None
+        explicit = re.findall(r"(?:atomic_number|atomic_num|z)\s*=\s*(\d+)", text, flags=re.IGNORECASE)
+        if explicit:
+            return int(explicit[0])
+        symbols = {
+            "H": 1, "C": 6, "N": 7, "O": 8, "F": 9, "P": 15,
+            "S": 16, "Cl": 17, "Br": 35, "I": 53,
+        }
+        return symbols.get(text)
+
+    def _load_dataset_atomic_mapping(self) -> Optional[Sequence[Any] | Mapping[Any, Any]]:
+        for key in ("rdkit_atomic_number_mapping", "atomic_number_mapping", "zinc_atomic_number_mapping"):
+            if self.config.get(key) is not None:
+                return self.config.get(key)
+        # scripts/train_model.py passes only model config to the wrapper.  Read the
+        # dataset config directly so ZINC mappings supplied in configs/datasets/zinc.yaml
+        # are honored by GruM's molecular decoder too.
+        root = Path(__file__).resolve().parents[4]
+        cfg_path = root / "configs" / "datasets" / f"{self.dataset_name}.yaml"
+        if cfg_path.exists():
+            try:
+                payload = yaml.safe_load(cfg_path.read_text()) or {}
+                return payload.get("rdkit_atomic_number_mapping")
+            except Exception:
+                return None
+        return None
+
+    def _explicit_atomic_numbers(self, num_classes: int) -> List[Optional[int]]:
+        mapping = self._load_dataset_atomic_mapping()
+        values: List[Optional[int]] = [None] * int(num_classes)
+        if isinstance(mapping, Mapping):
+            for key, value in mapping.items():
+                idx = self._as_int_or_none(key)
+                if idx is None or idx < 0 or idx >= num_classes:
+                    continue
+                parsed = self._as_int_or_none(value)
+                if parsed is None:
+                    parsed = self._symbol_to_atomic_number(value)
+                values[idx] = parsed
+        elif isinstance(mapping, Sequence) and not isinstance(mapping, (str, bytes)):
+            for idx, value in enumerate(list(mapping)[:num_classes]):
+                parsed = self._as_int_or_none(value)
+                if parsed is None:
+                    parsed = self._symbol_to_atomic_number(value)
+                values[idx] = parsed
+        return values
+
+    def _raw_node_label_values_from_config(self) -> List[str]:
+        meta = self.config.get("graph_attribute_metadata") or {}
+        candidates = [
+            (((meta.get("all_attribute_stats") or {}).get("node_label_values")) if isinstance(meta, Mapping) else None),
+            (((meta.get("all_attribute_stats_raw") or {}).get("node_label_values")) if isinstance(meta, Mapping) else None),
+            ((self.config.get("graph_attribute_stats") or {}).get("node_label_values") if isinstance(self.config.get("graph_attribute_stats"), Mapping) else None),
+        ]
+        for values in candidates:
+            if values:
+                return [str(v) for v in values]
+        return []
+
+    def _infer_atomic_numbers(self, num_classes: int) -> List[Optional[int]]:
+        explicit = self._explicit_atomic_numbers(num_classes)
+        if any(v is not None for v in explicit):
+            return explicit
+        raw_values = self._raw_node_label_values_from_config()
+        if len(raw_values) >= num_classes:
+            parsed: List[Optional[int]] = []
+            for value in raw_values[:num_classes]:
+                z = self._symbol_to_atomic_number(value)
+                # For QM9 only, bare raw integer labels are atomic numbers because
+                # the dataset builder records PyG's z attribute before canonicalizing.
+                if z is None and self.dataset_name == "qm9":
+                    z = self._as_int_or_none(value)
+                parsed.append(z)
+            if any(v is not None for v in parsed):
+                return parsed
+        if self.dataset_name == "qm9":
+            if num_classes == 4:
+                return list(self._GRUM_QM9_ATOMIC_NUMBERS)
+            if num_classes == 5:
+                return list(self._QM9_ATOMIC_NUMBERS)
+        if self.dataset_name in {"zinc", "zinc250k"} and num_classes == len(self._GRUM_ZINC_ATOMIC_NUMBERS):
+            # This is safe only for the upstream GruM ZINC250k vocabulary.  The
+            # default PyG ZINC benchmark has 21 category ids and will not enter here.
+            return list(self._GRUM_ZINC_ATOMIC_NUMBERS)
+        return [None] * int(num_classes)
+
+    def _molecular_vocab(self, graphs: Sequence[nx.Graph]) -> Dict[str, Any]:
+        node_counts: Counter[int] = Counter()
+        edge_counts: Counter[int] = Counter()
+        empirical_valence: Dict[int, float] = {}
+        observed_atomic_numbers: Dict[int, int] = {}
+        for g in graphs:
+            node_labels = {node: self._node_label_from_data(data) for node, data in g.nodes(data=True)}
+            for node, label in node_labels.items():
+                node_counts[int(label)] += 1
+                empirical_valence.setdefault(int(label), 0.0)
+                data = g.nodes[node]
+                z = self._as_int_or_none(data.get("atomic_number", data.get("atomic_num", data.get("z"))))
+                if z is not None and int(z) in self._COMMON_MAX_VALENCE:
+                    observed_atomic_numbers.setdefault(int(label), int(z))
+            valence = {node: 0.0 for node in g.nodes()}
+            for u, v, data in g.edges(data=True):
+                order = self._bond_order_from_label(self._edge_label_from_data(data))
+                if order <= 0:
+                    continue
+                edge_counts[int(order)] += 1
+                valence[u] = valence.get(u, 0.0) + float(order)
+                valence[v] = valence.get(v, 0.0) + float(order)
+            for node, value in valence.items():
+                label = int(node_labels.get(node, 0))
+                empirical_valence[label] = max(float(empirical_valence.get(label, 0.0)), float(value))
+        max_label = max(node_counts.keys(), default=0)
+        num_atom_types = int(max_label) + 1
+        atom_counts = np.asarray([node_counts.get(i, 0) for i in range(num_atom_types)], dtype=np.float64)
+        atom_probs = atom_counts / max(float(atom_counts.sum()), 1.0)
+        # GruM_2D molecular output supports single, double, and triple bonds.
+        bond_counts = np.asarray([edge_counts.get(i, 0) for i in (1, 2, 3)], dtype=np.float64)
+        bond_probs = bond_counts / max(float(bond_counts.sum()), 1.0)
+        atomic_numbers = self._infer_atomic_numbers(num_atom_types)
+        for label, z in observed_atomic_numbers.items():
+            if 0 <= int(label) < len(atomic_numbers):
+                atomic_numbers[int(label)] = int(z)
+        valence_caps: List[float] = []
+        for idx in range(num_atom_types):
+            z = atomic_numbers[idx] if idx < len(atomic_numbers) else None
+            if z is not None and int(z) in self._COMMON_MAX_VALENCE:
+                valence_caps.append(float(self._COMMON_MAX_VALENCE[int(z)]))
+            else:
+                # Fall back to observed training valence/degree for categorical
+                # labels whose chemistry cannot be decoded, e.g. raw PyG ZINC ids.
+                valence_caps.append(max(1.0, float(empirical_valence.get(idx, 1.0))))
+        return {
+            "num_atom_types": int(num_atom_types),
+            "atom_probs": [float(x) for x in atom_probs],
+            "bond_probs": [float(x) for x in bond_probs],
+            "atomic_numbers": [None if z is None else int(z) for z in atomic_numbers],
+            "valence_caps": [float(x) for x in valence_caps],
+        }
+
+    def _graphs_to_molecular_tensors(self, graphs: Sequence[nx.Graph], config: _EasyDict) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        max_node_num = int(config.data.max_node_num)
+        num_atom_types = int(config.data.max_feat_num)
+        adj_scale = float(getattr(config.model, "adj_scale", self._cfg("adj_scale", 3.0)))
+        xs: List[np.ndarray] = []
+        adjs: List[np.ndarray] = []
+        masks: List[np.ndarray] = []
+        for g in graphs:
+            n = int(g.number_of_nodes())
+            if n > max_node_num:
+                raise ValueError(f"Graph with {n} nodes exceeds GruM max_node_num={max_node_num}.")
+            x = np.zeros((max_node_num, num_atom_types), dtype=np.float32)
+            adj = np.zeros((max_node_num, max_node_num), dtype=np.float32)
+            mask = np.zeros((max_node_num,), dtype=np.float32)
+            mask[:n] = 1.0
+            for node, data in g.nodes(data=True):
+                idx = int(node)
+                if idx < 0 or idx >= n:
+                    continue
+                label = self._node_label_from_data(data)
+                label = max(0, min(num_atom_types - 1, int(label)))
+                x[idx, label] = 1.0
+            # If a graph had missing labels, keep a valid one-hot row instead of zeros.
+            for idx in range(n):
+                if x[idx].sum() <= 0:
+                    x[idx, 0] = 1.0
+            for u, v, data in g.edges(data=True):
+                uu, vv = int(u), int(v)
+                if uu == vv or uu < 0 or vv < 0 or uu >= n or vv >= n:
+                    continue
+                order = self._bond_order_from_label(self._edge_label_from_data(data))
+                if order <= 0:
+                    continue
+                order = max(1, min(3, int(order)))
+                adj[uu, vv] = adj[vv, uu] = float(order) / adj_scale
+            xs.append(x)
+            adjs.append(adj)
+            masks.append(mask)
+        return torch.tensor(np.stack(xs), dtype=torch.float32), torch.tensor(np.stack(adjs), dtype=torch.float32), torch.tensor(np.stack(masks), dtype=torch.float32)
 
     def _compute_features(
         self, adjs: torch.Tensor, masks: torch.Tensor, data_config: _EasyDict
@@ -870,32 +1216,37 @@ class GruMWrapper:
     # Model, loss, sampling
     # ------------------------------------------------------------------
     def _model_params(self, config: _EasyDict) -> Dict[str, Any]:
+        model_type = str(config.model.type)
         input_dims = {"X": int(config.data.max_feat_num), "E": int(config.model.input_dims.E), "y": int(config.model.input_dims.y) + 1}
-        output_dims = {"X": int(config.data.max_feat_num), "E": 1, "y": 0}
-        return {
-            "model_type": str(config.model.type),
+        output_dims = {"X": int(config.data.max_feat_num), "E": 2 if "mol" in model_type.lower() else 1, "y": 0}
+        params = {
+            "model_type": model_type,
             "n_layers": int(config.model.num_layers),
             "hidden_mlp_dims": _to_plain(config.model.hidden_mlp_dims),
             "hidden_dims": _to_plain(config.model.hidden_dims),
             "input_dims": input_dims,
             "output_dims": output_dims,
-            "feat_dict": _to_plain(config.data.feat),
         }
+        if "mol" in model_type.lower():
+            params["scale"] = float(getattr(config.model, "adj_scale", self._cfg("adj_scale", 3.0)))
+        else:
+            params["feat_dict"] = _to_plain(config.data.feat)
+        return params
 
     def _instantiate_model(self, params: Mapping[str, Any]) -> torch.nn.Module:
         mods = self._import_modules()
         params = dict(params)
-        model_type = params.pop("model_type", params.pop("type", "transformer"))
-        if str(model_type) != "transformer":
-            raise ValueError(
-                f"GruMWrapper currently supports the generic-graph GraphTransformer only, got {model_type!r}."
-            )
+        model_type = str(params.pop("model_type", params.pop("type", "transformer")))
         params["hidden_mlp_dims"] = _to_edict(params["hidden_mlp_dims"])
         params["hidden_dims"] = _to_edict(params["hidden_dims"])
         params["input_dims"] = _to_edict(params["input_dims"])
         params["output_dims"] = _to_edict(params["output_dims"])
-        params["feat_dict"] = _to_edict(params["feat_dict"])
-        return mods.transformer_mod.GraphTransformer(**params)
+        if model_type == "transformer_mol":
+            return mods.transformer_mod.GraphTransformer_Mol(**params)
+        if model_type == "transformer":
+            params["feat_dict"] = _to_edict(params["feat_dict"])
+            return mods.transformer_mod.GraphTransformer(**params)
+        raise ValueError(f"GruMWrapper got unknown upstream model_type={model_type!r}.")
 
     def _load_mix(self, cfg_mix: _EasyDict) -> Any:
         mods = self._import_modules()
@@ -1113,30 +1464,189 @@ class GruMWrapper:
             graphs.append(g)
         return graphs
 
-    def _qm9_constrained_postprocess_graphs(self, graphs: Sequence[nx.Graph], *, seed: int) -> List[nx.Graph]:
+    def _sampling_molecular_vocab(self, config: Optional[_EasyDict] = None) -> Dict[str, Any]:
+        for source in (
+            getattr(config, "benchmark_molecular_vocab", None) if config is not None else None,
+            (self._loaded_metadata or {}).get("molecular_vocab") if isinstance(self._loaded_metadata, Mapping) else None,
+        ):
+            if source:
+                return _to_plain(source)
+        if self._train_graphs:
+            return self._molecular_vocab(self._train_graphs)
+        # Last-resort fallback for old checkpoints without split provenance.
+        if self.dataset_name == "qm9":
+            n = 5
+            return {
+                "num_atom_types": n,
+                "atom_probs": [self._QM9_DEFAULT_LABEL_PROBS.get(i, 1.0 / n) for i in range(n)],
+                "bond_probs": [1.0, 0.0, 0.0],
+                "atomic_numbers": list(self._QM9_ATOMIC_NUMBERS),
+                "valence_caps": [float(self._COMMON_MAX_VALENCE[z]) for z in self._QM9_ATOMIC_NUMBERS],
+            }
+        n = len(self._GRUM_ZINC_ATOMIC_NUMBERS)
+        return {
+            "num_atom_types": n,
+            "atom_probs": [1.0 / n] * n,
+            "bond_probs": [1.0, 0.0, 0.0],
+            "atomic_numbers": list(self._GRUM_ZINC_ATOMIC_NUMBERS),
+            "valence_caps": [float(self._COMMON_MAX_VALENCE[z]) for z in self._GRUM_ZINC_ATOMIC_NUMBERS],
+        }
+
+    def _node_payload_from_label(self, label: int, vocab: Mapping[str, Any]) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"node_label": int(label), "feats": [float(label)]}
+        atomic_numbers = list(vocab.get("atomic_numbers") or [])
+        if 0 <= int(label) < len(atomic_numbers) and atomic_numbers[int(label)] is not None:
+            payload["atomic_number"] = int(atomic_numbers[int(label)])
+        return payload
+
+    def _edge_payload_from_order(self, order: int) -> Dict[str, Any]:
+        order = max(1, min(3, int(order)))
+        return {"edge_type": int(order), "edge_attr": [float(order)]}
+
+    def _sample_from_probs(self, rng: random.Random, probs: Sequence[float], candidates: Optional[Sequence[int]] = None) -> int:
+        if candidates is None:
+            candidates = list(range(len(probs)))
+        candidates = [int(c) for c in candidates]
+        if not candidates:
+            return 0
+        weights = [float(probs[c]) if 0 <= c < len(probs) else 0.0 for c in candidates]
+        total = float(sum(weights))
+        if total <= 0:
+            return int(candidates[int(rng.random() * len(candidates)) % len(candidates)])
+        threshold = rng.random() * total
+        cumulative = 0.0
+        for c, w in zip(candidates, weights):
+            cumulative += float(w)
+            if cumulative >= threshold:
+                return int(c)
+        return int(candidates[-1])
+
+    def _molecular_outputs_to_graphs(
+        self,
+        x: torch.Tensor,
+        adjs: torch.Tensor,
+        masks: torch.Tensor,
+        config: _EasyDict,
+    ) -> List[nx.Graph]:
+        vocab = self._sampling_molecular_vocab(config)
+        adj_scale = float(getattr(config.model, "adj_scale", self._cfg("adj_scale", 3.0)))
+        x_np = x.detach().cpu().numpy()
+        adj_np = adjs.detach().cpu().numpy()
+        masks_np = masks.detach().cpu().numpy()
+        graphs: List[nx.Graph] = []
+        for xb, adjb, mask in zip(x_np, adj_np, masks_np):
+            n = max(1, int(np.round(mask).astype(bool).sum()))
+            g = nx.Graph()
+            labels = np.argmax(np.asarray(xb[:n], dtype=np.float64), axis=-1)
+            for node, label in enumerate(labels):
+                g.add_node(int(node), **self._node_payload_from_label(int(label), vocab))
+            scaled = np.asarray(adjb[:n, :n], dtype=np.float32)
+            scaled = (scaled + scaled.T) / 2.0
+            scaled = scaled * adj_scale
+            # Match upstream quantize_mol thresholds: [0.5,1.5,2.5].
+            orders = np.zeros_like(scaled, dtype=np.int64)
+            orders[scaled >= 0.5] = 1
+            orders[scaled >= 1.5] = 2
+            orders[scaled >= 2.5] = 3
+            np.fill_diagonal(orders, 0)
+            for u in range(n):
+                for v in range(u + 1, n):
+                    order = int(orders[u, v])
+                    if order > 0:
+                        g.add_edge(u, v, **self._edge_payload_from_order(order))
+            g.graph["grum_native_molecular_decode"] = True
+            graphs.append(g)
+        return graphs
+
+    def _molecular_constrained_postprocess_graphs(self, graphs: Sequence[nx.Graph], *, seed: int) -> List[nx.Graph]:
+        """Attach molecule labels to legacy structure-only GruM samples safely.
+
+        Older GruM checkpoints trained by this benchmark generate only an adjacency
+        matrix.  The previous empirical-label fallback sampled atom/bond classes
+        independently, which is the main cause of near-zero ZINC RDKit validity.
+        This postprocessor instead assigns atom classes whose empirical/chemical
+        valence can support the generated degree, uses conservative single bonds,
+        and prunes impossible over-degree topology before adding labels.
+        """
         rng = random.Random(int(seed))
+        vocab = self._sampling_molecular_vocab(None)
+        atom_probs = [float(x) for x in (vocab.get("atom_probs") or [])]
+        valence_caps = [float(x) for x in (vocab.get("valence_caps") or [])]
+        max_degree = int(max([1.0] + valence_caps))
         out: List[nx.Graph] = []
         removed_edges = 0
         for graph in graphs:
             h = nx.convert_node_labels_to_integers(nx.Graph(graph), ordering="default")
-            removed_edges += self._prune_edges_to_max_degree(h, max_degree=4, rng=rng)
+            removed_edges += self._prune_edges_to_max_degree(h, max_degree=max_degree, rng=rng)
             for node in h.nodes:
                 degree = int(h.degree(node))
-                label = self._sample_qm9_label_for_degree(degree, rng)
-                h.nodes[node]["node_label"] = int(label)
-                h.nodes[node]["feats"] = [float(label)]
+                candidates = [i for i, cap in enumerate(valence_caps) if float(cap) + 1e-9 >= float(degree)]
+                if not candidates:
+                    candidates = [int(np.argmax(np.asarray(valence_caps)))] if valence_caps else [0]
+                label = self._sample_from_probs(rng, atom_probs or [1.0], candidates)
+                h.nodes[node].update(self._node_payload_from_label(label, vocab))
             for u, v in h.edges:
-                h.edges[u, v]["edge_type"] = 1
-                h.edges[u, v]["edge_attr"] = [1.0]
-            h.graph["grum_qm9_constrained_postprocess"] = True
-            h.graph["grum_qm9_postprocess_note"] = (
-                "GruM generated adjacency only; QM9 atom labels and single bonds were assigned by a valence-constrained benchmark postprocessor."
+                h.edges[u, v].update(self._edge_payload_from_order(1))
+            h.graph[f"grum_{self.dataset_name}_constrained_postprocess"] = True
+            h.graph[f"grum_{self.dataset_name}_postprocess_note"] = (
+                "GruM generated adjacency only; atom labels and single bonds were assigned by a valence-constrained benchmark postprocessor."
             )
             out.append(h)
         diag = self._last_sampling_diagnostics
-        diag["qm9_constrained_postprocess"] = True
-        diag["qm9_postprocess_removed_edges"] = int(diag.get("qm9_postprocess_removed_edges", 0)) + int(removed_edges)
+        diag[f"{self.dataset_name}_constrained_postprocess"] = True
+        diag[f"{self.dataset_name}_postprocess_removed_edges"] = int(diag.get(f"{self.dataset_name}_postprocess_removed_edges", 0)) + int(removed_edges)
         return out
+
+    def _qm9_constrained_postprocess_graphs(self, graphs: Sequence[nx.Graph], *, seed: int) -> List[nx.Graph]:
+        # Kept for compatibility with older callers.
+        return self._molecular_constrained_postprocess_graphs(graphs, seed=seed)
+
+    def _prune_molecular_graphs_to_valence(self, graphs: Sequence[nx.Graph]) -> List[nx.Graph]:
+        vocab = self._sampling_molecular_vocab(None)
+        valence_caps = [float(x) for x in (vocab.get("valence_caps") or [])]
+        out: List[nx.Graph] = []
+        total_removed = 0
+        for graph in graphs:
+            h = nx.convert_node_labels_to_integers(nx.Graph(graph), ordering="default")
+            removed = self._prune_edges_to_valence_caps(h, valence_caps)
+            total_removed += removed
+            if removed:
+                h.graph["grum_valence_pruned"] = True
+            out.append(h)
+        self._last_sampling_diagnostics["molecular_valence_pruned_edges"] = int(
+            self._last_sampling_diagnostics.get("molecular_valence_pruned_edges", 0)
+        ) + int(total_removed)
+        return out
+
+    def _node_valence_cap(self, graph: nx.Graph, node: Any, valence_caps: Sequence[float]) -> float:
+        label = self._as_int_or_none(graph.nodes[node].get("node_label"))
+        if label is not None and 0 <= label < len(valence_caps):
+            return float(valence_caps[label])
+        atomic_number = self._as_int_or_none(graph.nodes[node].get("atomic_number"))
+        if atomic_number is not None and atomic_number in self._COMMON_MAX_VALENCE:
+            return float(self._COMMON_MAX_VALENCE[atomic_number])
+        return max(1.0, max([1.0] + [float(x) for x in valence_caps]))
+
+    def _edge_order(self, graph: nx.Graph, u: Any, v: Any) -> int:
+        data = graph.edges[u, v]
+        return max(1, min(3, self._bond_order_from_label(data.get("edge_type", 1))))
+
+    def _prune_edges_to_valence_caps(self, graph: nx.Graph, valence_caps: Sequence[float]) -> int:
+        removed = 0
+        def valence(node: Any) -> float:
+            return float(sum(self._edge_order(graph, node, nbr) for nbr in graph.neighbors(node)))
+        while graph.number_of_edges():
+            overloaded = [node for node in graph.nodes if valence(node) > self._node_valence_cap(graph, node, valence_caps) + 1e-9]
+            if not overloaded:
+                break
+            node = max(overloaded, key=lambda n: valence(n) - self._node_valence_cap(graph, n, valence_caps))
+            neighbors = list(graph.neighbors(node))
+            if not neighbors:
+                break
+            neighbor = max(neighbors, key=lambda n: (self._edge_order(graph, node, n), valence(n)))
+            graph.remove_edge(node, neighbor)
+            removed += 1
+        return removed
 
     def _prune_edges_to_max_degree(self, graph: nx.Graph, *, max_degree: int, rng: random.Random) -> int:
         removed = 0
@@ -1160,16 +1670,7 @@ class GruMWrapper:
             for label, prob in self._QM9_DEFAULT_LABEL_PROBS.items()
             if int(self._QM9_VALENCE_BY_LABEL[label]) >= int(degree)
         }
-        if not candidates:
-            return 1
-        total = float(sum(candidates.values()))
-        threshold = rng.random() * total
-        cumulative = 0.0
-        for label, prob in sorted(candidates.items()):
-            cumulative += float(prob)
-            if cumulative >= threshold:
-                return int(label)
-        return int(next(reversed(candidates)))
+        return self._sample_from_probs(rng, [candidates.get(i, 0.0) for i in range(max(candidates.keys(), default=0) + 1)], list(candidates) or [1])
 
     # ------------------------------------------------------------------
     # Metadata and utility methods
@@ -1183,12 +1684,13 @@ class GruMWrapper:
     ) -> Dict[str, Any]:
         node_counts = [int(g.number_of_nodes()) for g in train_graphs]
         edge_counts = [int(g.number_of_edges()) for g in train_graphs]
-        return {
+        metadata = {
             "model": "grum",
             "dataset": self.dataset_name,
             "repo_root": str(self.repo_root),
             "project_root": str(self.project_root),
             "base_config": self.base_config_name,
+            "molecular_mode": "native" if self._uses_native_molecular_model(config) else "structure",
             "preserve_isolated_nodes": bool(self._cfg("preserve_isolated_nodes", True)),
             "split_sizes": {"train": len(train_graphs), "val": len(val_graphs), "test": len(test_graphs)},
             "node_counts": node_counts,
@@ -1198,6 +1700,9 @@ class GruMWrapper:
             "feat_dim": list(config.data.feat.dim),
             "max_feat_num": int(config.data.max_feat_num),
         }
+        if self._is_molecular_dataset():
+            metadata["molecular_vocab"] = _to_plain(getattr(config, "benchmark_molecular_vocab", None) or self._molecular_vocab(train_graphs))
+        return metadata
 
     def _write_provenance(
         self,

@@ -134,12 +134,17 @@ def _latex(rows: list[dict[str, str]]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create LaTeX compute-budget table from train/sample metadata.")
-    parser.add_argument("--datasets", nargs="+", choices=available_datasets(), default=["planar", "sbm"], help="Datasets to include.")
-    parser.add_argument("--models", nargs="+", choices=available_models(), default=["graphguide", "digress", "construct", "edp_gnn", "disco", "grum"], help="Models to include.")
+    parser.add_argument("--dataset", choices=available_datasets(), default=None, help="Single dataset to include.")
+    parser.add_argument("--model", choices=available_models(), default=None, help="Single model to include.")
+    parser.add_argument("--datasets", nargs="+", choices=available_datasets(), default=None, help="Datasets to include. Defaults to planar and SBM.")
+    parser.add_argument("--models", nargs="+", choices=available_models(), default=None, help="Models to include. Defaults to all benchmark models.")
     parser.add_argument("--output", type=str, default="outputs/tables/compute_budget.tex")
     args = parser.parse_args()
 
-    rows = [_row(dataset, model) for dataset in args.datasets for model in args.models]
+    datasets = [args.dataset] if args.dataset else (args.datasets if args.datasets is not None else ["planar", "sbm"])
+    models = [args.model] if args.model else (args.models if args.models is not None else ["graphguide", "digress", "construct", "edp_gnn", "disco", "grum"])
+
+    rows = [_row(dataset, model) for dataset in datasets for model in models]
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(_latex(rows) + "\n", encoding="utf-8")

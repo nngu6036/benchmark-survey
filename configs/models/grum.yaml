@@ -1,6 +1,4 @@
-# GruM wrapper configuration.
-# Set repo_root or export GRUM_REPO to the extracted upstream GruM repository.
-# The wrapper targets the generic-graph path in GruM_2D.
+# The wrapper uses GruM_2D. For QM9/ZINC it can use GruM's native molecular transformer path.
 seed: 42
 name: grum
 repo_root: null
@@ -12,18 +10,24 @@ run_root: outputs/grum_runs/{dataset}
 data_root: outputs/grum_data/{dataset}
 torch_num_threads: 1
 
-# Upstream base config to read from GruM_2D/config/{base_config}.yaml.
 # null means: use sbm for dataset=sbm, planar for dataset=planar, otherwise planar.
 base_config: null
+molecular_mode: native
+adj_scale: 3.0
+molecular_input_edge_powers: 2
+molecular_use_upstream_loss: true
+molecular_loss_type: null
+molecular_prune_invalid_valence: true
+molecular_constrained_postprocess: true
+qm9_constrained_postprocess: true
+zinc_constrained_postprocess: true
+
 
 # Graph/data handling.
 # GruM's original 2D generic code infers valid nodes from nonzero adjacency rows,
 # which drops true isolated nodes. The benchmark wrapper uses explicit masks instead.
 preserve_isolated_nodes: true
 drop_isolates_on_output: false
-# null pads to the largest graph in the training split. Set a larger integer
-# only when you intentionally want extra padded nodes; attention memory scales
-# quadratically with this value.
 max_node_num: null
 batch_size: 32
 num_workers: 0
@@ -89,11 +93,6 @@ noise_removal: true
 quantize_threshold: 0.5
 kernel: tv
 
-# GruM_2D is an adjacency generator. For QM9, assign atom/bond labels after
-# sampling with a simple valence-constrained postprocessor instead of the
-# unconstrained empirical-label fallback used for generic molecular wrappers.
-qm9_constrained_postprocess: true
-
 # Used only when loading an old upstream checkpoint without saved train node-count metadata.
 min_nodes: 1
 max_nodes: 64
@@ -101,8 +100,10 @@ max_nodes: 64
 capabilities:
   supports_training: true
   supports_sampling: true
-  supports_node_features: false
-  supports_edge_features: false
+  supports_node_features: true
+  supports_edge_features: true
+  supports_node_labels: true
+  supports_edge_labels: true
   supports_constraints: false
   supports_variable_size: true
   supports_featureless_graphs: true

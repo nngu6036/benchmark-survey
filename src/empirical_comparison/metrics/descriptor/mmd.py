@@ -42,6 +42,22 @@ def rbf_kernel_matrix(x: np.ndarray, y: np.ndarray, sigma: float) -> np.ndarray:
     return np.exp(-d2 / (2.0 * sigma * sigma))
 
 
+def _emd_weights(values: np.ndarray) -> np.ndarray:
+    weights = np.asarray(values, dtype=np.float64)
+    weights = np.where(np.isfinite(weights), weights, 0.0)
+    weights = np.maximum(weights, 0.0)
+    total = float(weights.sum())
+    if total > 0:
+        return weights
+    # Some descriptors, especially normalized orbit counts, can be all zeros
+    # for graphs without the counted motif. SciPy requires positive total
+    # weight, so represent the empty histogram as all mass in the first bin.
+    empty = np.zeros_like(weights, dtype=np.float64)
+    if empty.size:
+        empty[0] = 1.0
+    return empty
+
+
 def mmd_unbiased(
     xs: Sequence[np.ndarray] | np.ndarray,
     ys: Sequence[np.ndarray] | np.ndarray,
@@ -88,10 +104,12 @@ def gaussian_emd_kernel_matrix(x: np.ndarray, y: np.ndarray, sigma: float = 1.0)
     bins = np.arange(x.shape[1], dtype=np.float64)
     k = np.zeros((x.shape[0], y.shape[0]), dtype=np.float64)
     for i, xi in enumerate(x):
+        xi_weights = _emd_weights(xi)
         for j, yj in enumerate(y):
+            yj_weights = _emd_weights(yj)
             # scipy.stats.wasserstein_distance accepts weights that do not sum to
             # one, but normalized histograms are preferred.
-            emd = wasserstein_distance(bins, bins, xi, yj)
+            emd = wasserstein_distance(bins, bins, xi_weights, yj_weights)
             k[i, j] = np.exp(-(emd * emd) / (2.0 * sigma * sigma))
     return k
 

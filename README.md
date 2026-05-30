@@ -400,6 +400,8 @@ PYTHONPATH=src python scripts/make_latex_tables.py \
 
 For a single LaTeX table row subset, use `--dataset` and `--model` with `make_latex_tables.py`.
 
+If both `polygraphscore_official.json` and `classifier_metrics.json` are present for a dataset/model, `aggregate_results.py` uses the official PolyGraphScore value for overlapping PGS columns such as `pgs_js_distance`.
+
 `make_latex_tables.py` writes a full table to `outputs/tables/aggregated_results.tex` and a simplified value-only table to `outputs/tables/aggregated_results_simple.tex`.
 
 To generate only the molecular reporting table, run:

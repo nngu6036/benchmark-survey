@@ -43,6 +43,18 @@ def _write_metric_for(path: Path, *, dataset: str, model: str, score: float) -> 
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _write_metric_family(path: Path, *, metric_family: str, results: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "dataset": "planar",
+        "model": "digress",
+        "metric_family": metric_family,
+        "runtime_seconds": 1.0,
+        "results": results,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def test_aggregate_results_filters_requested_run_ids(tmp_path, monkeypatch):
     module = _load_script_module()
     monkeypatch.chdir(tmp_path)
@@ -138,3 +150,25 @@ def test_aggregate_results_debug_reports_high_std_from_existing_aggregate(tmp_pa
     assert "aggregation input: existing aggregate row" in out
     assert "high relative std (>20% of average):" in out
     assert "score: mean=10, std=3, std/mean=30.0%" in out
+
+
+def test_aggregate_results_prefers_official_polygraphscore_over_classifier_metric(tmp_path, monkeypatch):
+    module = _load_script_module()
+    monkeypatch.chdir(tmp_path)
+    _write_metric_family(
+        tmp_path / "outputs/metrics/planar/digress/classifier_metrics.json",
+        metric_family="polygraphscore_classifier",
+        results={"pgs_js_distance": 0.9},
+    )
+    _write_metric_family(
+        tmp_path / "outputs/metrics/planar/digress/polygraphscore_official.json",
+        metric_family="polygraphscore_official",
+        results={"pgs_js_distance": 0.2, "polygraphscore": 0.2},
+    )
+
+    monkeypatch.setattr(sys, "argv", ["aggregate_results.py", "--datasets", "planar", "--models", "digress"])
+    module.main()
+
+    wide = (tmp_path / "outputs/tables/aggregated_results.csv").read_text(encoding="utf-8")
+    assert "0.2" in wide
+    assert "0.9" not in wide

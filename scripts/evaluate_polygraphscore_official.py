@@ -86,6 +86,27 @@ def json_default(obj: Any) -> Any:
     return str(obj)
 
 
+
+
+def patch_scipy_compat() -> None:
+    """Patch SciPy/NetworkX compatibility for older NetworkX spectral code.
+
+    Some NetworkX versions call scipy.errstate inside normalized_laplacian_matrix.
+    Newer SciPy builds do not expose scipy.errstate; numpy.errstate is the intended
+    context manager.  PolyGraph's EigenvalueHistogram can trigger this path.
+    """
+    try:
+        import scipy as _scipy  # type: ignore
+    except Exception as exc:
+        DEPENDENCY_SHIMS.setdefault("scipy", f"SciPy import failed before spectral descriptor use: {exc}")
+        return
+    if not hasattr(_scipy, "errstate"):
+        try:
+            setattr(_scipy, "errstate", np.errstate)
+            DEPENDENCY_SHIMS["scipy.errstate"] = "patched scipy.errstate = numpy.errstate for NetworkX spectral descriptor compatibility"
+        except Exception as exc:
+            DEPENDENCY_SHIMS["scipy.errstate"] = f"failed to patch scipy.errstate: {exc}"
+
 def load_yaml(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
@@ -751,6 +772,7 @@ def prepare_imports(cfg: Mapping[str, Any], descriptors: list[str], classifier_n
 
 def import_polygraph_objects(polygraph_root: str | None, *, survey_root: Path) -> dict[str, Any]:
     resolved = add_polygraph_root(polygraph_root, survey_root=survey_root)
+    patch_scipy_compat()
     try:
         from polygraph.metrics.base import PolyGraphDiscrepancy, PolyGraphDiscrepancyInterval
         from polygraph.utils.descriptors import ClusteringHistogram, EigenvalueHistogram, OrbitCounts, RandomGIN, SparseDegreeHistogram

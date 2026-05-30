@@ -31,6 +31,11 @@ EXCLUDE_FROM_METRIC_AGG = {
     "run_id",
 }
 
+METRIC_FAMILY_PRIORITY = {
+    "polygraphscore_official": 30,
+    "polygraphscore_classifier": 20,
+}
+
 
 def _flatten_results(obj: dict[str, Any]) -> dict[str, Any]:
     protocol = obj.get("protocol", {}) or {}
@@ -165,14 +170,131 @@ def _make_wide(selected_df: pd.DataFrame) -> pd.DataFrame:
                 continue
             if col not in group:
                 continue
-            vals = group[col].dropna().tolist()
-            if len(vals) == 0:
+            value_rows = group[group[col].notna()].copy()
+            if value_rows.empty:
                 continue
+            value_rows["_metric_priority"] = value_rows["metric_family"].astype(str).map(METRIC_FAMILY_PRIORITY).fillna(0)
+            value_rows = value_rows.sort_values(["_metric_priority"], ascending=False, kind="stable")
+            vals = value_rows[col].tolist()
+            families = value_rows["metric_family"].astype(str).tolist()
             if len(vals) > 1 and len(set(map(str, vals))) > 1:
-                logger.warning("Multiple different values for %s/%s/%s: %s; keeping first", dataset, model, col, vals)
+                logger.warning(
+                    "Multiple different values for %s/%s/%s from metric families %s: %s; keeping %s",
+                    dataset,
+                    model,
+                    col,
+                    families,
+                    vals,
+                    families[0],
+                )
             out[col] = vals[0]
         merged_rows.append(out)
     return pd.DataFrame(merged_rows).sort_values(["dataset", "model"])
+
+
+def _debug_metric_columns(df: pd.DataFrame) -> list[str]:
+    columns = []
+    for col in df.columns:
+        if col in EXCLUDE_FROM_METRIC_AGG or col.endswith("_std"):
+            continue
+        values = df[col].dropna()
+        if values.empty:
+            continue
+        if _is_numeric_series(values):
+            columns.append(col)
+    return columns
+
+
+def _format_debug_value(value: Any) -> str:
+    if value is None:
+        return "--"
+    try:
+        if pd.isna(value):
+            return "--"
+    except Exception:
+        pass
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)
+
+
+def _relative_std_exceeds_threshold(mean: Any, std: Any, *, threshold: float = 0.20) -> tuple[bool, float | None]:
+    try:
+        mean_value = float(mean)
+        std_value = float(std)
+    except (TypeError, ValueError):
+        return False, None
+    if np.isnan(mean_value) or np.isnan(std_value):
+        return False, None
+    denominator = abs(mean_value)
+    if denominator == 0:
+        return std_value > 0, None
+    ratio = std_value / denominator
+    return ratio > threshold, ratio
+
+
+def _print_debug_run_statistics(long_df: pd.DataFrame, selected_df: pd.DataFrame) -> None:
+    print("Aggregate debug: statistics used for aggregation")
+    for (dataset, model, metric_family), group in long_df.groupby(["dataset", "model", "metric_family"], dropna=False):
+        print("")
+        print(f"{dataset} / {model} / {metric_family}")
+        metric_cols = _debug_metric_columns(group)
+        individual_rows = group[~group["is_aggregate"].fillna(False).astype(bool)] if "is_aggregate" in group.columns else group
+        aggregate_rows = group[group["is_aggregate"].fillna(False).astype(bool)] if "is_aggregate" in group.columns else pd.DataFrame()
+        selected_match = selected_df[
+            (selected_df["dataset"].astype(str) == str(dataset))
+            & (selected_df["model"].astype(str) == str(model))
+            & (selected_df["metric_family"].astype(str) == str(metric_family))
+        ]
+        selected_row = selected_match.iloc[0] if not selected_match.empty else None
+        selected_is_existing_aggregate = bool(selected_row is not None and selected_row.get("is_aggregate", False) and not aggregate_rows.empty)
+
+        if selected_is_existing_aggregate:
+            print("  aggregation input: existing aggregate row")
+            values = [f"{col}={_format_debug_value(selected_row.get(col))}" for col in metric_cols]
+            print("    aggregate: " + (", ".join(values) if values else "no aggregated numeric metrics"))
+            if selected_row.get("source_file"):
+                print(f"      source: {selected_row['source_file']}")
+        elif individual_rows.empty:
+            print("  contributing run ids: none")
+        else:
+            print(f"  contributing run ids: {len(individual_rows)}")
+            sort_cols = [col for col in ["run_id", "seed"] if col in individual_rows.columns]
+            sorted_rows = individual_rows.sort_values(sort_cols) if sort_cols else individual_rows
+            for _, row in sorted_rows.iterrows():
+                run_id = row.get("run_id")
+                run_label = "run_id=legacy/default" if pd.isna(run_id) else f"run_id={int(run_id)}"
+                values = [f"{col}={_format_debug_value(row.get(col))}" for col in metric_cols]
+                source = row.get("source_file")
+                print(f"    {run_label}: " + (", ".join(values) if values else "no aggregated numeric metrics"))
+                if source:
+                    print(f"      source: {source}")
+
+        if selected_row is not None:
+            summary_parts = []
+            high_relative_std_parts = []
+            for col in metric_cols:
+                if col in selected_row.index and not pd.isna(selected_row.get(col)):
+                    part = f"{col}_mean={_format_debug_value(selected_row.get(col))}"
+                    std_col = f"{col}_std"
+                    if std_col in selected_row.index and not pd.isna(selected_row.get(std_col)):
+                        part += f", {std_col}={_format_debug_value(selected_row.get(std_col))}"
+                        exceeds, ratio = _relative_std_exceeds_threshold(selected_row.get(col), selected_row.get(std_col))
+                        if exceeds:
+                            ratio_text = "undefined" if ratio is None else f"{ratio:.1%}"
+                            high_relative_std_parts.append(
+                                f"{col}: mean={_format_debug_value(selected_row.get(col))}, "
+                                f"std={_format_debug_value(selected_row.get(std_col))}, std/mean={ratio_text}"
+                            )
+                    summary_parts.append(part)
+            if summary_parts:
+                print("  selected aggregate:")
+                for part in summary_parts:
+                    print(f"    {part}")
+            if high_relative_std_parts:
+                print("  high relative std (>20% of average):")
+                for part in high_relative_std_parts:
+                    print(f"    {part}")
 
 
 def main() -> None:
@@ -182,6 +304,7 @@ def main() -> None:
     parser.add_argument("--datasets", nargs="+", choices=available_datasets(), default=None, help="Datasets to include. Defaults to all discovered datasets.")
     parser.add_argument("--models", nargs="+", choices=available_models(), default=None, help="Models to include. Defaults to all discovered models.")
     parser.add_argument("--run-ids", type=int, nargs="+", default=None, help="Only average these run ids. Existing aggregate JSONs are ignored when this is set.")
+    parser.add_argument("--debug", action="store_true", help="Print individual per-run statistics used for aggregation.")
     args = parser.parse_args()
 
     metric_dir = Path(args.metric_dir)
@@ -227,6 +350,8 @@ def main() -> None:
     long_df.to_csv(long_out, index=False)
 
     selected_df = _select_or_build_aggregate_rows(long_df, prefer_existing_aggregates=requested_run_ids is None)
+    if args.debug:
+        _print_debug_run_statistics(long_df, selected_df)
     selected_out = output_dir / "aggregated_results_by_metric_family.csv"
     selected_df.to_csv(selected_out, index=False)
 

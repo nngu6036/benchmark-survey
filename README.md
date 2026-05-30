@@ -280,19 +280,24 @@ Pass `--run-id N` to evaluate one run-specific sample such as `outputs/samples/<
 
 The generic descriptor script reports degree MMD, clustering MMD, spectral MMD, structural-summary MMD, optional orbit MMD, and `attribute_mmd` when attributes are present. The molecular descriptor script reports those generic descriptors plus `atom_type_mmd`, `bond_type_mmd`, RDKit sanitization validity, uniqueness, novelty, and `valid_unique_novel_rate`. Uniqueness and novelty are computed on canonical RDKit SMILES of valid generated molecules; novelty compares against the training split.
 
-Classifier/PGS-JS metric:
+Official PolyGraphScore / PGS-JS metric:
 
 ```bash
-PYTHONPATH=src python scripts/evaluate_classifier_metrics.py \
+PYTHONPATH=src python scripts/evaluate_polygraphscore_official.py \
   --dataset qm9 \
   --model disco \
+  --run-ids 0 1 2 \
+  --max-reference-graphs 1024 \
+  --max-generated-graphs 1024 \
   --num-splits 5 \
   --cv-folds 4 \
   --classifier auto \
   --skip-orbits
 ```
 
-`--classifier auto` uses TabPFN when installed and otherwise falls back to standardized logistic regression. The main reported value is `pgs_js_distance`; the payload also stores the JS-divergence lower bound, selected descriptor, split-level scores, feature dimensions, and resolved classifier. The default descriptor pool includes structural descriptors and an `attributes` descriptor when attributes are available.
+`evaluate_polygraphscore_official.py` calls the official `polygraph-benchmark` implementation and writes `polygraphscore_official.json`. It accepts the same common inputs as `evaluate_classifier_metrics.py`, including `--dataset`, `--model`, `--run-id`, `--run-ids`, `--max-reference-graphs`, `--max-generated-graphs`, `--num-splits`, `--classifier`, `--skip-orbit(s)`, descriptor bin flags, and attribute-schema flags. Some compatibility flags are accepted but ignored by the official package when that package controls the corresponding behavior internally. `--classifier auto` uses TabPFN when installed and otherwise falls back to logistic regression.
+
+`evaluate_classifier_metrics.py` remains available as the benchmark-local PGS-style fallback/ablation and writes `classifier_metrics.json`. When both official and fallback PGS files exist, `aggregate_results.py` uses the official value for overlapping table columns such as `pgs_js_distance`.
 
 Feature-space MMD:
 
@@ -334,7 +339,7 @@ for dataset in "${datasets[@]}"; do
         --skip-orbit
     fi
 
-    PYTHONPATH=src python scripts/evaluate_classifier_metrics.py \
+    PYTHONPATH=src python scripts/evaluate_polygraphscore_official.py \
       --dataset "$dataset" \
       --model "$model" \
       --run-ids 0 1 2\
@@ -420,7 +425,9 @@ Model hyperparameters used by the benchmark wrappers are summarized below. Value
 
 ## 6. Paper-style PGS-JS protocol
 
-`scripts/evaluate_classifier_metrics.py` implements a balanced, held-out PGS-JS classifier protocol:
+`scripts/evaluate_polygraphscore_official.py` is the preferred PGS path. It delegates descriptor selection, fit/test splitting, cross-validation, and scoring to the official `polygraph-benchmark` implementation, then saves `polygraphscore_official.json` under `outputs/metrics/<dataset>/<model>/`.
+
+`scripts/evaluate_classifier_metrics.py` implements a benchmark-local balanced, held-out PGS-JS classifier protocol that is useful as a fallback or ablation:
 
 1. Load the reference split and generated samples; apply `--max-reference-graphs` and `--max-generated-graphs`.
 2. Balance the two classes by using `min(num_reference_graphs, num_generated_graphs)` graphs per class. This count is recorded as `balanced_graphs_per_class_used`.
@@ -429,7 +436,7 @@ Model hyperparameters used by the benchmark wrappers are summarized below. Value
 5. Select the descriptor with the highest cross-validation score, fit the final classifier on the full fit half, and evaluate on the held-out test half.
 6. Average `pgs_js_distance` across repeated partitions and report the split standard deviation.
 
-For held-out examples with true domain label probability `p_true`, the script computes `JSD_lb = clip(mean(log2(p_true)) + 1, 0, 1)` and reports `pgs_js_distance = sqrt(JSD_lb)`. Lower is better because a classifier that cannot distinguish generated from reference graphs gives a score near 0, while an easily separable generated distribution gives a higher score. The payload also records `pgs_js_divergence_lower_bound`, `pgs_mean_true_class_probability`, `pgs_binary_accuracy_at_0_5`, the selected descriptor, descriptor-wise CV/test scores, and the resolved classifier backend.
+For held-out examples with true domain label probability `p_true`, the local fallback computes `JSD_lb = clip(mean(log2(p_true)) + 1, 0, 1)` and reports `pgs_js_distance = sqrt(JSD_lb)`. Lower is better because a classifier that cannot distinguish generated from reference graphs gives a score near 0, while an easily separable generated distribution gives a higher score. The payload also records `pgs_js_divergence_lower_bound`, `pgs_mean_true_class_probability`, `pgs_binary_accuracy_at_0_5`, the selected descriptor, descriptor-wise CV/test scores, and the resolved classifier backend.
 
 ## 7. Useful output locations
 

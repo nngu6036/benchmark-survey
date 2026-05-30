@@ -67,17 +67,6 @@ def log(msg: str, *args: Any) -> None:
     print("[official-pgs] " + (msg % args if args else msg), file=sys.stderr)
 
 
-def debug_enabled(cfg: Mapping[str, Any] | argparse.Namespace) -> bool:
-    if isinstance(cfg, argparse.Namespace):
-        return bool(getattr(cfg, "debug", False))
-    return as_bool(cfg.get("debug"), False)
-
-
-def debug_log(cfg: Mapping[str, Any] | argparse.Namespace, msg: str, *args: Any) -> None:
-    if debug_enabled(cfg):
-        log("DEBUG " + msg, *args)
-
-
 def json_default(obj: Any) -> Any:
     if isinstance(obj, Path):
         return str(obj)
@@ -785,7 +774,7 @@ def import_polygraph_objects(polygraph_root: str | None, *, survey_root: Path) -
     resolved = add_polygraph_root(polygraph_root, survey_root=survey_root)
     patch_scipy_compat()
     try:
-        from polygraph.metrics.base import PolyGraphDiscrepancy, PolyGraphDiscrepancyInterval
+        from polygraph.metrics.base import PolyGraphDiscrepancy, PolyGraphDiscrepancyInterval, default_classifier
         from polygraph.utils.descriptors import ClusteringHistogram, EigenvalueHistogram, OrbitCounts, RandomGIN, SparseDegreeHistogram
     except ModuleNotFoundError as exc:
         hint = "Set POLYGRAPH_REPO=/path/to/polygraph-benchmark or install the package."
@@ -798,6 +787,7 @@ def import_polygraph_objects(polygraph_root: str | None, *, survey_root: Path) -
         "OrbitCounts": OrbitCounts,
         "RandomGIN": RandomGIN,
         "SparseDegreeHistogram": SparseDegreeHistogram,
+        "default_classifier": default_classifier,
         "polygraph_root_resolved": resolved,
     }
 
@@ -824,57 +814,67 @@ def make_descriptors(poly: Mapping[str, Any], names: Sequence[str], cfg: Mapping
     return descriptors
 
 
-def make_classifier(name: str, cfg: Mapping[str, Any], seed: int) -> tuple[Any | None, str]:
+class PositiveClassProbabilityAdapter:
+    """Adapter that makes predict_proba(X)[:, 1] mean P(y == 1).
+
+    The official PolyGraph implementation indexes column 1 directly.  That is
+    safe for scikit-learn classifiers whose classes_ are usually [0, 1], but
+    some TabPFN versions may preserve first-seen label order.  Because
+    PolyGraph trains with reference labels first (1) and generated labels second
+    (0), such a classifier can expose classes_ == [1, 0].  Without this adapter,
+    column 1 is then P(y == 0), which makes a strong discriminator look
+    anti-correlated and the JS lower bound is clipped to 0.
+    """
+
+    def __init__(self, base: Any):
+        self.base = base
+        self.classes_ = None
+
+    def fit(self, X: Any, y: Any) -> "PositiveClassProbabilityAdapter":
+        self.base.fit(X, y)
+        self.classes_ = getattr(self.base, "classes_", None)
+        return self
+
+    def predict_proba(self, X: Any) -> np.ndarray:
+        proba = np.asarray(self.base.predict_proba(X))
+        classes = getattr(self.base, "classes_", self.classes_)
+        if classes is None:
+            return proba
+        classes_list = list(classes)
+        if 1 in classes_list and proba.ndim == 2:
+            pos_idx = classes_list.index(1)
+            p1 = proba[:, pos_idx]
+            # Return columns in the convention expected by PolyGraph internals:
+            # column 0 = P(y == 0), column 1 = P(y == 1).
+            return np.column_stack([1.0 - p1, p1])
+        return proba
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.base, name)
+
+
+def make_classifier(name: str, cfg: Mapping[str, Any], seed: int, poly: Mapping[str, Any]) -> tuple[Any | None, str]:
     normalized = name.lower().replace("_", "-")
     if normalized in {"official-default", "default", "tabpfn", "tabpfn-v25"}:
-        return None, "polygraph-benchmark default TabPFN"
+        return PositiveClassProbabilityAdapter(poly["default_classifier"]()), "polygraph-benchmark default TabPFN + P(y=1) probability adapter"
     if normalized in {"logistic", "logistic-regression", "lr"}:
         from sklearn.linear_model import LogisticRegression
 
-        return LogisticRegression(max_iter=int(cfg.get("logistic_max_iter", 5000)), random_state=seed), "sklearn LogisticRegression"
+        base = LogisticRegression(max_iter=int(cfg.get("logistic_max_iter", 5000)), random_state=seed)
+        return PositiveClassProbabilityAdapter(base), "sklearn LogisticRegression + P(y=1) probability adapter"
     if normalized == "auto":
         if importlib.util.find_spec("tabpfn") is not None:
-            return None, "polygraph-benchmark default TabPFN"
+            return PositiveClassProbabilityAdapter(poly["default_classifier"]()), "polygraph-benchmark default TabPFN(auto) + P(y=1) probability adapter"
         from sklearn.linear_model import LogisticRegression
 
-        return LogisticRegression(max_iter=int(cfg.get("logistic_max_iter", 5000)), random_state=seed), "sklearn LogisticRegression(auto fallback)"
+        base = LogisticRegression(max_iter=int(cfg.get("logistic_max_iter", 5000)), random_state=seed)
+        return PositiveClassProbabilityAdapter(base), "sklearn LogisticRegression(auto fallback) + P(y=1) probability adapter"
     raise ValueError(f"Unknown classifier {name!r}")
 
 
 def interval_to_dict(x: Any) -> dict[str, float]:
     return {"mean": float(x.mean), "std": float(x.std)}
 
-
-def graph_collection_summary(graphs: Sequence[Any]) -> dict[str, Any]:
-    node_counts: list[int] = []
-    edge_counts: list[int] = []
-    for graph in graphs:
-        try:
-            node_counts.append(int(graph.number_of_nodes()))
-            edge_counts.append(int(graph.number_of_edges()))
-        except Exception:
-            continue
-    if not node_counts:
-        return {"count": len(graphs), "node_counts": "unavailable", "edge_counts": "unavailable"}
-    nodes = np.asarray(node_counts, dtype=float)
-    edges = np.asarray(edge_counts, dtype=float)
-    return {
-        "count": len(graphs),
-        "nodes_min": int(nodes.min()),
-        "nodes_mean": float(nodes.mean()),
-        "nodes_max": int(nodes.max()),
-        "edges_min": int(edges.min()),
-        "edges_mean": float(edges.mean()),
-        "edges_max": int(edges.max()),
-    }
-
-
-def numeric_result_summary(results: Mapping[str, Any]) -> dict[str, float]:
-    out: dict[str, float] = {}
-    for key, value in results.items():
-        if isinstance(value, (int, float, np.number)) and np.isfinite(float(value)):
-            out[key] = float(value)
-    return out
 
 def format_point_result(raw: Mapping[str, Any], variant: str) -> dict[str, Any]:
     score = float(raw["pgd"])
@@ -930,11 +930,8 @@ def compute_pgs(poly: Mapping[str, Any], ref: Sequence[Any], gen: Sequence[Any],
         for split_id in range(num_splits):
             split_seed = seed + split_id * 9973
             metric = poly["PolyGraphDiscrepancy"](reference_graphs=shuffle_graphs(ref, split_seed), descriptors=dict(descriptors), variant=variant, classifier=classifier)
-            raw_result = metric.compute(shuffle_graphs(gen, split_seed + 1))
-            debug_log(cfg, "official raw point result split=%d seed=%d keys=%s raw=%s", split_id, split_seed, sorted(dict(raw_result).keys()), json.dumps(raw_result, default=json_default, sort_keys=True)[:2000])
-            formatted_result = format_point_result(raw_result, variant)
-            debug_log(cfg, "formatted point result split=%d numeric=%s descriptor=%s", split_id, numeric_result_summary(formatted_result), formatted_result.get("pgd_descriptor"))
-            split_results.append(formatted_result)        if num_splits == 1:
+            split_results.append(format_point_result(metric.compute(shuffle_graphs(gen, split_seed + 1)), variant))
+        if num_splits == 1:
             results = split_results[0]
         else:
             values: dict[str, list[float]] = defaultdict(list)
@@ -954,11 +951,8 @@ def compute_pgs(poly: Mapping[str, Any], ref: Sequence[Any], gen: Sequence[Any],
         subsample_size = min(2048, min(len(ref), len(gen)) // 2)
     num_samples = int(cfg.get("num_samples", cfg.get("num_subsamples", 10)) or 10)
     metric = poly["PolyGraphDiscrepancyInterval"](reference_graphs=ref, descriptors=dict(descriptors), variant=variant, classifier=classifier, subsample_size=subsample_size, num_samples=num_samples)
-    raw_result = metric.compute(gen)
-    debug_log(cfg, "official raw interval result keys=%s raw=%s", sorted(dict(raw_result).keys()), json.dumps(raw_result, default=json_default, sort_keys=True)[:2000])
-    formatted_result = format_interval_result(raw_result, variant)
-    debug_log(cfg, "formatted interval result numeric=%s", numeric_result_summary(formatted_result))
-    return formatted_result, {"estimate": "interval", "official_class": "PolyGraphDiscrepancyInterval", "subsample_size": subsample_size, "num_samples": num_samples}
+    return format_interval_result(metric.compute(gen), variant), {"estimate": "interval", "official_class": "PolyGraphDiscrepancyInterval", "subsample_size": subsample_size, "num_samples": num_samples}
+
 
 def package_versions() -> dict[str, str | None]:
     out = {}
@@ -977,11 +971,9 @@ def evaluate_one(dataset: str, model: str, run_id: int | None, cfg: Mapping[str,
     reference_split = str(cfg.get("reference_split", "test"))
     ref_path = dataset_split_path(root, dataset_root, dataset, reference_split)
     gen_path = sample_path(root, samples_root, dataset, model, run_id)
-    debug_log(cfg, "evaluate_one dataset=%s model=%s run_id=%s seed=%s", dataset, model, run_id, seed)
-    debug_log(cfg, "paths reference=%s exists=%s generated=%s exists=%s", ref_path, ref_path.exists(), gen_path, gen_path.exists())
     ref_raw = load_graph_list(ref_path)
     gen_raw = load_graph_list(gen_path)
-    debug_log(cfg, "raw graph counts reference=%d generated=%d", len(ref_raw), len(gen_raw))    ref_graphs = normalize_graphs(ref_raw, simple=not as_bool(cfg.get("keep_multigraph"), False), relabel=not as_bool(cfg.get("no_relabel"), False), drop_empty=as_bool(cfg.get("drop_empty_graphs"), False))
+    ref_graphs = normalize_graphs(ref_raw, simple=not as_bool(cfg.get("keep_multigraph"), False), relabel=not as_bool(cfg.get("no_relabel"), False), drop_empty=as_bool(cfg.get("drop_empty_graphs"), False))
     gen_graphs = normalize_graphs(gen_raw, simple=not as_bool(cfg.get("keep_multigraph"), False), relabel=not as_bool(cfg.get("no_relabel"), False), drop_empty=as_bool(cfg.get("drop_empty_graphs"), False))
     max_ref = int_or_none(cfg.get("max_reference_graphs"))
     max_gen = int_or_none(cfg.get("max_generated_graphs"))
@@ -990,12 +982,14 @@ def evaluate_one(dataset: str, model: str, run_id: int | None, cfg: Mapping[str,
         max_ref = min(max_ref, max_graphs) if max_ref is not None else max_graphs
         max_gen = min(max_gen, max_graphs) if max_gen is not None else max_graphs
     ref, gen = balance_graphs(ref_graphs, gen_graphs, max_ref=max_ref, max_gen=max_gen, seed=seed)
-    debug_log(cfg, "normalized graph summary reference=%s generated=%s", graph_collection_summary(ref_graphs), graph_collection_summary(gen_graphs))
-    debug_log(cfg, "balanced graph summary reference=%s generated=%s max_ref=%s max_gen=%s max_graphs=%s", graph_collection_summary(ref), graph_collection_summary(gen), max_ref, max_gen, max_graphs)
     descriptors = make_descriptors(poly, descriptors_names, cfg, seed)
-    debug_log(cfg, "descriptors requested=%s constructed=%s classifier=%s", list(descriptors_names), list(descriptors.keys()), classifier_resolved)
     results, protocol_extra = compute_pgs(poly, ref, gen, descriptors, classifier, cfg, seed)
-    debug_log(cfg, "final run numeric results=%s protocol_extra=%s", numeric_result_summary(results), protocol_extra)    payload = {
+    numeric_scores = [float(v) for k, v in results.items() if k.startswith("pgs_subscore_") and isinstance(v, (int, float, np.number))]
+    result_diagnostics = {}
+    if numeric_scores and all(abs(v) < 1e-12 for v in numeric_scores):
+        result_diagnostics["all_descriptor_scores_zero"] = True
+        result_diagnostics["hint"] = "All descriptor scores are exactly zero. This can be genuine, but it often indicates classifier failures swallowed by official PolyGraph or a predict_proba class-column ordering issue. This wrapper uses a P(y=1) adapter to guard against the class-column issue."
+    payload = {
         "dataset": dataset,
         "model": model,
         "run_id": run_id,
@@ -1027,6 +1021,7 @@ def evaluate_one(dataset: str, model: str, run_id: int | None, cfg: Mapping[str,
             "orca_exec": DEPENDENCY_SHIMS.get("orbit_count"),
             **protocol_extra,
         },
+        "result_diagnostics": result_diagnostics,
         "dependency_shims": dict(DEPENDENCY_SHIMS),
         "polygraph_root_resolved": poly.get("polygraph_root_resolved"),
         "versions": package_versions(),
@@ -1037,13 +1032,9 @@ def evaluate_one(dataset: str, model: str, run_id: int | None, cfg: Mapping[str,
     return payload
 
 
-def aggregate_payloads(payloads: Sequence[dict[str, Any]], *, debug: bool = False) -> dict[str, Any]:
+def aggregate_payloads(payloads: Sequence[dict[str, Any]]) -> dict[str, Any]:
     values: dict[str, list[float]] = defaultdict(list)
-    if debug:
-        log("DEBUG aggregating %d payload(s)", len(payloads))
     for payload in payloads:
-        if debug:
-            log("DEBUG aggregate input run_id=%s numeric=%s source=%s", payload.get("run_id"), numeric_result_summary(dict(payload.get("results", {}))), payload.get("generated_path"))
         for k, v in dict(payload.get("results", {})).items():
             if isinstance(v, (int, float, np.number)) and np.isfinite(float(v)):
                 values[k].append(float(v))
@@ -1055,8 +1046,6 @@ def aggregate_payloads(payloads: Sequence[dict[str, Any]], *, debug: bool = Fals
         flat[f"{k}_mean"] = float(arr.mean())
         flat[f"{k}_std"] = float(arr.std(ddof=0))
         nested[k] = {"mean": float(arr.mean()), "std": float(arr.std(ddof=0)), "num_runs": int(arr.size)}
-    if debug:
-        log("DEBUG aggregate flat results=%s", flat)
     return {"flat": flat, "nested": nested}
 
 
@@ -1203,7 +1192,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--continue-on-error", action="store_true", default=None)
     p.add_argument("--fail-fast", action="store_true")
     p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--debug", action="store_true", help="Print detailed graph loading, raw official result, and aggregation diagnostics.")
     return p.parse_args(argv)
 
 
@@ -1214,7 +1202,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     assert cfg_path is not None
     experiment_cfg = load_yaml(cfg_path)
     cfg = merge_cfg(args, experiment_cfg)
-    cfg["debug"] = bool(args.debug or cfg.get("debug", False))
     datasets, models = resolve_datasets_models(args, experiment_cfg)
     seed = int(cfg.get("seed", 42))
     random.seed(seed)
@@ -1223,7 +1210,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     filename = str(cfg.get("metric_filename", DEFAULT_METRIC_FILENAME))
     metrics_root = str(cfg.get("metrics_root", "outputs/metrics"))
     force = bool(args.force or experiment_cfg.get("force", False) or cfg.get("force", False))
-    debug_log(cfg, "root=%s config=%s datasets/models pending", root, cfg_path)
     continue_on_error = bool(experiment_cfg.get("continue_on_error", True)) if args.continue_on_error is None else bool(args.continue_on_error)
     if args.fail_fast:
         continue_on_error = False
@@ -1237,7 +1223,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.dry_run:
         descriptors = prepare_imports(cfg, descriptors, str(cfg.get("classifier", "official_default")), survey_root=root)
         poly = import_polygraph_objects(str(cfg.get("polygraph_root")) if cfg.get("polygraph_root") else None, survey_root=root)
-        classifier, classifier_resolved = make_classifier(str(cfg.get("classifier", "official_default")), cfg, seed)
+        classifier, classifier_resolved = make_classifier(str(cfg.get("classifier", "official_default")), cfg, seed, poly)
 
     batch_records: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
@@ -1250,9 +1236,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if out_path.exists() and not force:
                     log("skip existing %s", out_path)
                     try:
-                        existing_payload = json.loads(out_path.read_text(encoding="utf-8"))
-                        payloads.append(existing_payload)
-                        debug_log(cfg, "loaded existing result run_id=%s numeric=%s from=%s", existing_payload.get("run_id"), numeric_result_summary(dict(existing_payload.get("results", {}))), out_path)
+                        payloads.append(json.loads(out_path.read_text(encoding="utf-8")))
                     except Exception:
                         pass
                     continue
@@ -1270,7 +1254,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if not continue_on_error:
                         raise
             if len(payloads) > 1 and not args.dry_run:
-                agg = aggregate_payloads(payloads, debug=debug_enabled(cfg))
+                agg = aggregate_payloads(payloads)
                 agg_payload = {"dataset": dataset, "model": model, "metric_family": "polygraphscore_official", "is_aggregate": True, "run_ids": [p.get("run_id") for p in payloads], "num_runs": len(payloads), "results": agg["flat"], "run_result_summary": agg["nested"]}
                 agg_path = aggregate_path(root, metrics_root, dataset, model, filename)
                 save_json(agg_payload, agg_path)
@@ -1282,5 +1266,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Compute PolyGraphScore with the official polygraph-benchmark implementation.
 
 Drop this file into the survey repo as:
@@ -65,6 +65,17 @@ DEPENDENCY_SHIMS: dict[str, str] = {}
 
 def log(msg: str, *args: Any) -> None:
     print("[official-pgs] " + (msg % args if args else msg), file=sys.stderr)
+
+
+def debug_enabled(cfg: Mapping[str, Any] | argparse.Namespace) -> bool:
+    if isinstance(cfg, argparse.Namespace):
+        return bool(getattr(cfg, "debug", False))
+    return as_bool(cfg.get("debug"), False)
+
+
+def debug_log(cfg: Mapping[str, Any] | argparse.Namespace, msg: str, *args: Any) -> None:
+    if debug_enabled(cfg):
+        log("DEBUG " + msg, *args)
 
 
 def json_default(obj: Any) -> Any:
@@ -834,6 +845,37 @@ def interval_to_dict(x: Any) -> dict[str, float]:
     return {"mean": float(x.mean), "std": float(x.std)}
 
 
+def graph_collection_summary(graphs: Sequence[Any]) -> dict[str, Any]:
+    node_counts: list[int] = []
+    edge_counts: list[int] = []
+    for graph in graphs:
+        try:
+            node_counts.append(int(graph.number_of_nodes()))
+            edge_counts.append(int(graph.number_of_edges()))
+        except Exception:
+            continue
+    if not node_counts:
+        return {"count": len(graphs), "node_counts": "unavailable", "edge_counts": "unavailable"}
+    nodes = np.asarray(node_counts, dtype=float)
+    edges = np.asarray(edge_counts, dtype=float)
+    return {
+        "count": len(graphs),
+        "nodes_min": int(nodes.min()),
+        "nodes_mean": float(nodes.mean()),
+        "nodes_max": int(nodes.max()),
+        "edges_min": int(edges.min()),
+        "edges_mean": float(edges.mean()),
+        "edges_max": int(edges.max()),
+    }
+
+
+def numeric_result_summary(results: Mapping[str, Any]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for key, value in results.items():
+        if isinstance(value, (int, float, np.number)) and np.isfinite(float(value)):
+            out[key] = float(value)
+    return out
+
 def format_point_result(raw: Mapping[str, Any], variant: str) -> dict[str, Any]:
     score = float(raw["pgd"])
     subscores = {str(k): float(v) for k, v in dict(raw.get("subscores", {})).items()}
@@ -888,8 +930,11 @@ def compute_pgs(poly: Mapping[str, Any], ref: Sequence[Any], gen: Sequence[Any],
         for split_id in range(num_splits):
             split_seed = seed + split_id * 9973
             metric = poly["PolyGraphDiscrepancy"](reference_graphs=shuffle_graphs(ref, split_seed), descriptors=dict(descriptors), variant=variant, classifier=classifier)
-            split_results.append(format_point_result(metric.compute(shuffle_graphs(gen, split_seed + 1)), variant))
-        if num_splits == 1:
+            raw_result = metric.compute(shuffle_graphs(gen, split_seed + 1))
+            debug_log(cfg, "official raw point result split=%d seed=%d keys=%s raw=%s", split_id, split_seed, sorted(dict(raw_result).keys()), json.dumps(raw_result, default=json_default, sort_keys=True)[:2000])
+            formatted_result = format_point_result(raw_result, variant)
+            debug_log(cfg, "formatted point result split=%d numeric=%s descriptor=%s", split_id, numeric_result_summary(formatted_result), formatted_result.get("pgd_descriptor"))
+            split_results.append(formatted_result)        if num_splits == 1:
             results = split_results[0]
         else:
             values: dict[str, list[float]] = defaultdict(list)
@@ -909,8 +954,11 @@ def compute_pgs(poly: Mapping[str, Any], ref: Sequence[Any], gen: Sequence[Any],
         subsample_size = min(2048, min(len(ref), len(gen)) // 2)
     num_samples = int(cfg.get("num_samples", cfg.get("num_subsamples", 10)) or 10)
     metric = poly["PolyGraphDiscrepancyInterval"](reference_graphs=ref, descriptors=dict(descriptors), variant=variant, classifier=classifier, subsample_size=subsample_size, num_samples=num_samples)
-    return format_interval_result(metric.compute(gen), variant), {"estimate": "interval", "official_class": "PolyGraphDiscrepancyInterval", "subsample_size": subsample_size, "num_samples": num_samples}
-
+    raw_result = metric.compute(gen)
+    debug_log(cfg, "official raw interval result keys=%s raw=%s", sorted(dict(raw_result).keys()), json.dumps(raw_result, default=json_default, sort_keys=True)[:2000])
+    formatted_result = format_interval_result(raw_result, variant)
+    debug_log(cfg, "formatted interval result numeric=%s", numeric_result_summary(formatted_result))
+    return formatted_result, {"estimate": "interval", "official_class": "PolyGraphDiscrepancyInterval", "subsample_size": subsample_size, "num_samples": num_samples}
 
 def package_versions() -> dict[str, str | None]:
     out = {}
@@ -929,9 +977,11 @@ def evaluate_one(dataset: str, model: str, run_id: int | None, cfg: Mapping[str,
     reference_split = str(cfg.get("reference_split", "test"))
     ref_path = dataset_split_path(root, dataset_root, dataset, reference_split)
     gen_path = sample_path(root, samples_root, dataset, model, run_id)
+    debug_log(cfg, "evaluate_one dataset=%s model=%s run_id=%s seed=%s", dataset, model, run_id, seed)
+    debug_log(cfg, "paths reference=%s exists=%s generated=%s exists=%s", ref_path, ref_path.exists(), gen_path, gen_path.exists())
     ref_raw = load_graph_list(ref_path)
     gen_raw = load_graph_list(gen_path)
-    ref_graphs = normalize_graphs(ref_raw, simple=not as_bool(cfg.get("keep_multigraph"), False), relabel=not as_bool(cfg.get("no_relabel"), False), drop_empty=as_bool(cfg.get("drop_empty_graphs"), False))
+    debug_log(cfg, "raw graph counts reference=%d generated=%d", len(ref_raw), len(gen_raw))    ref_graphs = normalize_graphs(ref_raw, simple=not as_bool(cfg.get("keep_multigraph"), False), relabel=not as_bool(cfg.get("no_relabel"), False), drop_empty=as_bool(cfg.get("drop_empty_graphs"), False))
     gen_graphs = normalize_graphs(gen_raw, simple=not as_bool(cfg.get("keep_multigraph"), False), relabel=not as_bool(cfg.get("no_relabel"), False), drop_empty=as_bool(cfg.get("drop_empty_graphs"), False))
     max_ref = int_or_none(cfg.get("max_reference_graphs"))
     max_gen = int_or_none(cfg.get("max_generated_graphs"))
@@ -940,9 +990,12 @@ def evaluate_one(dataset: str, model: str, run_id: int | None, cfg: Mapping[str,
         max_ref = min(max_ref, max_graphs) if max_ref is not None else max_graphs
         max_gen = min(max_gen, max_graphs) if max_gen is not None else max_graphs
     ref, gen = balance_graphs(ref_graphs, gen_graphs, max_ref=max_ref, max_gen=max_gen, seed=seed)
+    debug_log(cfg, "normalized graph summary reference=%s generated=%s", graph_collection_summary(ref_graphs), graph_collection_summary(gen_graphs))
+    debug_log(cfg, "balanced graph summary reference=%s generated=%s max_ref=%s max_gen=%s max_graphs=%s", graph_collection_summary(ref), graph_collection_summary(gen), max_ref, max_gen, max_graphs)
     descriptors = make_descriptors(poly, descriptors_names, cfg, seed)
+    debug_log(cfg, "descriptors requested=%s constructed=%s classifier=%s", list(descriptors_names), list(descriptors.keys()), classifier_resolved)
     results, protocol_extra = compute_pgs(poly, ref, gen, descriptors, classifier, cfg, seed)
-    payload = {
+    debug_log(cfg, "final run numeric results=%s protocol_extra=%s", numeric_result_summary(results), protocol_extra)    payload = {
         "dataset": dataset,
         "model": model,
         "run_id": run_id,
@@ -984,9 +1037,13 @@ def evaluate_one(dataset: str, model: str, run_id: int | None, cfg: Mapping[str,
     return payload
 
 
-def aggregate_payloads(payloads: Sequence[dict[str, Any]]) -> dict[str, Any]:
+def aggregate_payloads(payloads: Sequence[dict[str, Any]], *, debug: bool = False) -> dict[str, Any]:
     values: dict[str, list[float]] = defaultdict(list)
+    if debug:
+        log("DEBUG aggregating %d payload(s)", len(payloads))
     for payload in payloads:
+        if debug:
+            log("DEBUG aggregate input run_id=%s numeric=%s source=%s", payload.get("run_id"), numeric_result_summary(dict(payload.get("results", {}))), payload.get("generated_path"))
         for k, v in dict(payload.get("results", {})).items():
             if isinstance(v, (int, float, np.number)) and np.isfinite(float(v)):
                 values[k].append(float(v))
@@ -998,6 +1055,8 @@ def aggregate_payloads(payloads: Sequence[dict[str, Any]]) -> dict[str, Any]:
         flat[f"{k}_mean"] = float(arr.mean())
         flat[f"{k}_std"] = float(arr.std(ddof=0))
         nested[k] = {"mean": float(arr.mean()), "std": float(arr.std(ddof=0)), "num_runs": int(arr.size)}
+    if debug:
+        log("DEBUG aggregate flat results=%s", flat)
     return {"flat": flat, "nested": nested}
 
 
@@ -1041,14 +1100,49 @@ def merge_cfg(args: argparse.Namespace, experiment_cfg: Mapping[str, Any]) -> di
         cfg.setdefault("max_reference_graphs", int(experiment_cfg["num_reference_graphs"]))
     if experiment_cfg.get("num_generated_graphs") is not None:
         cfg.setdefault("max_generated_graphs", int(experiment_cfg["num_generated_graphs"]))
-    for key in ["polygraph_root", "dataset_root", "samples_root", "metrics_root", "reference_split", "classifier", "variant", "mode", "estimate", "subsample_size", "num_samples", "max_graphs", "max_reference_graphs", "max_generated_graphs", "gin_device", "logistic_max_iter", "orca_exec"]:
+    for key in [
+        "polygraph_root",
+        "dataset_root",
+        "samples_root",
+        "metrics_root",
+        "reference_split",
+        "classifier",
+        "variant",
+        "mode",
+        "estimate",
+        "subsample_size",
+        "num_samples",
+        "num_splits",
+        "max_graphs",
+        "max_reference_graphs",
+        "max_generated_graphs",
+        "degree_bins",
+        "clustering_bins",
+        "spectral_bins",
+        "max_degree",
+        "gin_dim",
+        "gin_device",
+        "logistic_max_iter",
+        "orca_exec",
+        "cv_folds",
+        "attribute_schema_enabled",
+        "node_label_attr",
+        "node_feature_attr",
+        "edge_label_attr",
+        "edge_feature_attr",
+        "graph_label_attr",
+    ]:
         value = getattr(args, key, None)
         if value is not None:
             cfg[key] = value
+    if getattr(args, "device", None) is not None and cfg.get("gin_device") is None:
+        cfg["gin_device"] = args.device
     if args.descriptors:
         cfg["descriptors"] = args.descriptors
-    if args.skip_orbits:
+    if args.skip_orbits or getattr(args, "skip_orbit", False):
         cfg["skip_orbits"] = True
+    if getattr(args, "no_attribute_descriptor", False):
+        cfg["no_attribute_descriptor"] = True
     if args.skip_gin:
         cfg["skip_gin"] = True
     cfg["seed"] = int(args.seed if args.seed is not None else experiment_cfg.get("seed", 42))
@@ -1078,11 +1172,27 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--estimate", choices=["point", "interval", "subsampling"], default=None)
     p.add_argument("--mode", dest="estimate", choices=["point", "interval", "subsampling"], default=None, help="Alias for --estimate")
     p.add_argument("--descriptors", nargs="+", default=None)
+    p.add_argument("--skip-orbit", action="store_true", help="Backward-compatible alias for --skip-orbits")
     p.add_argument("--skip-orbits", action="store_true")
     p.add_argument("--skip-gin", action="store_true")
     p.add_argument("--max-graphs", type=int, default=None)
     p.add_argument("--max-reference-graphs", type=int, default=None)
     p.add_argument("--max-generated-graphs", type=int, default=None)
+    p.add_argument("--num-splits", type=int, default=None, help="Repeated official point estimates for this sampled graph set.")
+    p.add_argument("--cv-folds", type=int, default=None, help="Accepted for compatibility; official polygraph-benchmark currently controls CV internally.")
+    p.add_argument("--degree-bins", type=int, default=None, help="Accepted for compatibility; official sparse-degree descriptor controls its own bins.")
+    p.add_argument("--clustering-bins", type=int, default=None)
+    p.add_argument("--spectral-bins", type=int, default=None)
+    p.add_argument("--max-degree", type=int, default=None, help="Accepted for compatibility; official sparse-degree descriptor controls its own support.")
+    p.add_argument("--gin-dim", type=int, default=None, help="Accepted for compatibility; official RandomGIN controls its output dimension.")
+    p.add_argument("--no-attribute-descriptor", action="store_true", help="Accepted for compatibility; official descriptor set has no benchmark attribute descriptor.")
+    p.add_argument("--attribute-schema-enabled", choices=["auto", "true", "false"], default=None, help="Accepted for compatibility; official PGS ignores benchmark attribute schema.")
+    p.add_argument("--node-label-attr", default=None, help="Accepted for compatibility; official PGS ignores benchmark attribute schema.")
+    p.add_argument("--node-feature-attr", default=None, help="Accepted for compatibility; official PGS ignores benchmark attribute schema.")
+    p.add_argument("--edge-label-attr", default=None, help="Accepted for compatibility; official PGS ignores benchmark attribute schema.")
+    p.add_argument("--edge-feature-attr", default=None, help="Accepted for compatibility; official PGS ignores benchmark attribute schema.")
+    p.add_argument("--graph-label-attr", default=None, help="Accepted for compatibility; official PGS ignores benchmark attribute schema.")
+    p.add_argument("--device", default=None, help="Compatibility alias for --gin-device when --gin-device is not set.")
     p.add_argument("--subsample-size", type=int, default=None)
     p.add_argument("--num-samples", type=int, default=None)
     p.add_argument("--gin-device", default=None)
@@ -1093,6 +1203,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--continue-on-error", action="store_true", default=None)
     p.add_argument("--fail-fast", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--debug", action="store_true", help="Print detailed graph loading, raw official result, and aggregation diagnostics.")
     return p.parse_args(argv)
 
 
@@ -1103,6 +1214,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     assert cfg_path is not None
     experiment_cfg = load_yaml(cfg_path)
     cfg = merge_cfg(args, experiment_cfg)
+    cfg["debug"] = bool(args.debug or cfg.get("debug", False))
     datasets, models = resolve_datasets_models(args, experiment_cfg)
     seed = int(cfg.get("seed", 42))
     random.seed(seed)
@@ -1111,6 +1223,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     filename = str(cfg.get("metric_filename", DEFAULT_METRIC_FILENAME))
     metrics_root = str(cfg.get("metrics_root", "outputs/metrics"))
     force = bool(args.force or experiment_cfg.get("force", False) or cfg.get("force", False))
+    debug_log(cfg, "root=%s config=%s datasets/models pending", root, cfg_path)
     continue_on_error = bool(experiment_cfg.get("continue_on_error", True)) if args.continue_on_error is None else bool(args.continue_on_error)
     if args.fail_fast:
         continue_on_error = False
@@ -1137,7 +1250,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if out_path.exists() and not force:
                     log("skip existing %s", out_path)
                     try:
-                        payloads.append(json.loads(out_path.read_text(encoding="utf-8")))
+                        existing_payload = json.loads(out_path.read_text(encoding="utf-8"))
+                        payloads.append(existing_payload)
+                        debug_log(cfg, "loaded existing result run_id=%s numeric=%s from=%s", existing_payload.get("run_id"), numeric_result_summary(dict(existing_payload.get("results", {}))), out_path)
                     except Exception:
                         pass
                     continue
@@ -1155,7 +1270,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if not continue_on_error:
                         raise
             if len(payloads) > 1 and not args.dry_run:
-                agg = aggregate_payloads(payloads)
+                agg = aggregate_payloads(payloads, debug=debug_enabled(cfg))
                 agg_payload = {"dataset": dataset, "model": model, "metric_family": "polygraphscore_official", "is_aggregate": True, "run_ids": [p.get("run_id") for p in payloads], "num_runs": len(payloads), "results": agg["flat"], "run_result_summary": agg["nested"]}
                 agg_path = aggregate_path(root, metrics_root, dataset, model, filename)
                 save_json(agg_payload, agg_path)
@@ -1167,3 +1282,5 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

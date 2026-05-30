@@ -1,0 +1,61 @@
+# Add this block under the top-level `metrics:` key in configs/experiment.yaml.
+# The script reads all parameters here; CLI should normally only pass datasets,
+# models, and run ids.
+#
+# Required environment variables for paper-style runs:
+#   export POLYGRAPH_REPO=/absolute/path/to/polygraph-benchmark
+#   export ORCA_EXEC=/absolute/path/to/orca
+#
+# POLYGRAPH_REPO points to the extracted official implementation. ORCA_EXEC is
+# used only when the Python `orbit-count` package is unavailable.
+polygraphscore_official:
+  enabled: true
+
+  # Prefer POLYGRAPH_REPO from the environment. Leave this null unless you need
+  # a per-run override. Values like "${POLYGRAPH_REPO}" are also supported.
+  polygraph_root: null
+
+  # Same reference convention used by the other survey evaluation scripts.
+  reference_split: test
+  metric_filename: polygraphscore_official.json
+
+  # Paper-style PGS-JS. The official package calls the class
+  # PolyGraphDiscrepancy; this JS-distance score is PolyGraphScore.
+  mode: point                 # point or interval
+  variant: jsd                # jsd = paper PGS-JS; informedness = PGS-TV ablation
+  classifier: tabpfn          # paper-style; use logistic only for smoke tests
+
+  # Official generic descriptor set from Algorithm 1 / StandardPGD.
+  descriptors: [orbit4, orbit5, degree, clustering, spectral, gin]
+  skip_orbits: false
+  skip_gin: false
+
+  # Leave null to use all available graphs, or set explicit caps for paper-style
+  # comparison, e.g. 2048 reference and 2048 generated graphs.
+  max_reference_graphs: null
+  max_generated_graphs: null
+  max_graphs: null
+
+  # Workaround for environments where pip cannot install the orbit-count wheel.
+  # The script injects an ORCA-backed orbit_count shim when the Python package is
+  # unavailable. This preserves orbit4/orbit5 instead of silently dropping them.
+  allow_orbit_count_fallback: true
+  orca_exec: null             # Prefer ORCA_EXEC from the environment.
+  auto_compile_orca: false    # Keep false when ORCA_EXEC is managed externally.
+  skip_orbits_if_unavailable: false     # true = non-paper fallback
+
+  # Point mode only: repeat official point computation after deterministic
+  # reshuffling. Use 1 for a single official point estimate.
+  num_splits: 1
+
+  # Interval mode only. Official interval mode requires at least
+  # 2 * subsample_size graphs on both reference and generated sides.
+  subsample_size: 2048
+  num_samples: 10
+
+  # Descriptor/classifier options.
+  clustering_bins: 100
+  spectral_bins: 200
+  gin_device: cpu
+  gin_seed: 42
+  logistic_max_iter: 5000

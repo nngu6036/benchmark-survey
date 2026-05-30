@@ -101,10 +101,17 @@ def main() -> None:
     desc_cfg = metrics_cfg.get("descriptor", {}) or {}
     learned_cfg = metrics_cfg.get("learned_feature", {}) or {}
     classifier_cfg = metrics_cfg.get("classifier", {}) or {}
+    official_pgs_cfg = (
+        metrics_cfg.get("polygraphscore_official", {})
+        or metrics_cfg.get("official_polygraphscore", {})
+        or metrics_cfg.get("pgs_official", {})
+        or {}
+    )
 
     learned_reference_split = args.learned_reference_split or learned_cfg.get("reference_split", "train")
     descriptor_reference_split = args.descriptor_reference_split or desc_cfg.get("reference_split", "test")
     classifier_reference_split = args.classifier_reference_split or classifier_cfg.get("reference_split", "test")
+    official_pgs_reference_split = official_pgs_cfg.get("reference_split", classifier_reference_split)
 
     script_py = sys.executable
     commands: list[list[str]] = []
@@ -246,6 +253,31 @@ def main() -> None:
                     if args.skip_orbit or classifier_cfg.get("skip_orbits", False) or classifier_cfg.get("skip_orbit", False):
                         clf_cmd.append("--skip-orbits")
                     commands.append(clf_cmd)
+
+                if _enabled(metrics_cfg, "polygraphscore_official", False) or _enabled(metrics_cfg, "official_polygraphscore", False) or _enabled(metrics_cfg, "pgs_official", False):
+                    official_cmd = [
+                        script_py,
+                        "scripts/evaluate_polygraphscore_official.py",
+                        "--experiment-config",
+                        args.experiment_config,
+                        "--dataset",
+                        dataset,
+                        "--model",
+                        model,
+                        "--seed",
+                        str(actual_seed),
+                        "--reference-split",
+                        official_pgs_reference_split,
+                        "--max-reference-graphs",
+                        str(num_reference_graphs),
+                        "--max-generated-graphs",
+                        str(num_samples),
+                    ]
+                    if actual_run_id is not None:
+                        official_cmd += ["--run-id", str(actual_run_id)]
+                    if args.force or cfg.get("force", False):
+                        official_cmd.append("--force")
+                    commands.append(official_cmd)
 
     commands.append([script_py, "scripts/aggregate_results.py"])
     commands.append([script_py, "scripts/make_latex_tables.py"])

@@ -461,48 +461,226 @@ def install_tabpfn_stub_if_logistic(classifier_name: str) -> None:
     DEPENDENCY_SHIMS["tabpfn"] = "import stub for logistic_regression mode"
 
 
-def install_torch_geometric_stub_if_no_gin(descriptors: Sequence[str]) -> None:
-    if "gin" in descriptors or importlib.util.find_spec("torch_geometric") is not None:
-        return
+def torch_geometric_is_usable() -> tuple[bool, str | None]:
+    """Return whether the installed torch_geometric stack can be imported.
+
+    A common failure mode on shared servers is that torch_geometric itself is
+    installed, but one of its binary extension packages, e.g. torch_cluster,
+    torch_scatter, or torch_sparse, was compiled for a different PyTorch ABI.
+    In that case importlib.find_spec succeeds but importing torch_geometric
+    raises OSError with an undefined symbol.  The official PolyGraph package
+    imports torch_geometric at module import time because of the RandomGIN
+    descriptor, so we need to detect that failure before importing PolyGraph.
+    """
+    try:
+        import torch_geometric  # noqa: F401
+        from torch_geometric.data import Batch  # noqa: F401
+        from torch_geometric.utils import degree, from_networkx  # noqa: F401
+        from torch_geometric.nn import global_add_pool, global_max_pool, global_mean_pool  # noqa: F401
+        from torch_geometric.nn.conv import MessagePassing  # noqa: F401
+        return True, None
+    except Exception as exc:  # noqa: BLE001 - includes OSError from broken binary wheels
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def install_torch_geometric_shim(reason: str) -> None:
+    """Install a small pure-PyTorch subset of torch_geometric used by RandomGIN.
+
+    The official PolyGraph RandomGIN descriptor only needs:
+      * torch_geometric.utils.from_networkx
+      * torch_geometric.utils.degree
+      * torch_geometric.data.Batch.from_data_list
+      * torch_geometric.nn.global_{add,mean,max}_pool
+      * torch_geometric.nn.conv.MessagePassing with add/mean/max aggregation
+
+    This shim avoids importing broken compiled PyG extensions such as
+    torch_cluster while preserving the official PolyGraph descriptor code path.
+    It is intended for evaluation only, not for training arbitrary PyG models.
+    """
     import torch
+    import torch.nn as nn
 
     tg = types.ModuleType("torch_geometric")
     data = types.ModuleType("torch_geometric.data")
     utils = types.ModuleType("torch_geometric.utils")
-    nn = types.ModuleType("torch_geometric.nn")
+    nn_mod = types.ModuleType("torch_geometric.nn")
     conv = types.ModuleType("torch_geometric.nn.conv")
 
-    def missing(*args: Any, **kwargs: Any):
-        raise ImportError("torch_geometric is required for the GIN descriptor")
+    class DataObj:
+        def __init__(self, **kwargs: Any) -> None:
+            self.__dict__.update(kwargs)
 
-    class Batch:  # pragma: no cover
+        def to(self, device: str | torch.device):
+            for key, value in list(self.__dict__.items()):
+                if torch.is_tensor(value):
+                    setattr(self, key, value.to(device))
+            return self
+
+    def from_networkx(g: Any, group_node_attrs: Any = None, group_edge_attrs: Any = None):
+        nodes = list(g.nodes())
+        node_to_idx = {node: i for i, node in enumerate(nodes)}
+        edges: list[tuple[int, int]] = []
+        edge_attrs: list[list[float]] = []
+
+        # PyG's from_networkx converts undirected NetworkX graphs to directed
+        # edge lists.  Mirroring that behavior keeps the RandomGIN descriptor as
+        # close as possible to the official PyG-backed path.
+        for u, v, attrs in g.edges(data=True):
+            pairs = [(u, v)] if getattr(g, "is_directed", lambda: False)() else [(u, v), (v, u)]
+            for a, b in pairs:
+                edges.append((node_to_idx[a], node_to_idx[b]))
+                if group_edge_attrs:
+                    edge_attrs.append([float(attrs.get(k, 0.0)) for k in group_edge_attrs])
+
+        if edges:
+            edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+        else:
+            edge_index = torch.empty((2, 0), dtype=torch.long)
+
+        x = None
+        if group_node_attrs:
+            x = torch.tensor(
+                [[float(g.nodes[node].get(k, 0.0)) for k in group_node_attrs] for node in nodes],
+                dtype=torch.float32,
+            )
+
+        edge_attr = None
+        if group_edge_attrs:
+            edge_attr = torch.tensor(edge_attrs, dtype=torch.float32) if edge_attrs else torch.empty((0, len(group_edge_attrs)), dtype=torch.float32)
+
+        return DataObj(edge_index=edge_index, num_nodes=len(nodes), x=x, edge_attr=edge_attr)
+
+    def degree(index: torch.Tensor, num_nodes: int | None = None, dtype: Any = None):
+        if num_nodes is None:
+            num_nodes = int(index.max().item()) + 1 if index.numel() else 0
+        out = torch.bincount(index.to(torch.long), minlength=num_nodes)
+        if dtype is not None:
+            return out.to(dtype)
+        return out.to(torch.float32)
+
+    class Batch(DataObj):
         @classmethod
-        def from_data_list(cls, *args: Any, **kwargs: Any):
-            return missing()
+        def from_data_list(cls, data_list: Sequence[Any]):
+            edge_indices = []
+            xs = []
+            edge_attrs = []
+            batch_parts = []
+            offset = 0
+            for graph_idx, d in enumerate(data_list):
+                n = int(d.num_nodes)
+                if getattr(d, "edge_index", None) is not None:
+                    edge_indices.append(d.edge_index + offset)
+                if getattr(d, "x", None) is not None:
+                    xs.append(d.x)
+                if getattr(d, "edge_attr", None) is not None:
+                    edge_attrs.append(d.edge_attr)
+                batch_parts.append(torch.full((n,), graph_idx, dtype=torch.long))
+                offset += n
+            edge_index = torch.cat(edge_indices, dim=1) if edge_indices else torch.empty((2, 0), dtype=torch.long)
+            batch = torch.cat(batch_parts, dim=0) if batch_parts else torch.empty((0,), dtype=torch.long)
+            x = torch.cat(xs, dim=0) if xs else None
+            edge_attr = torch.cat(edge_attrs, dim=0) if edge_attrs else None
+            return cls(edge_index=edge_index, batch=batch, num_nodes=offset, x=x, edge_attr=edge_attr)
 
-    class MessagePassing(torch.nn.Module):  # pragma: no cover
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def _num_graphs(batch: torch.Tensor) -> int:
+        return int(batch.max().item()) + 1 if batch.numel() else 0
+
+    def global_add_pool(x: torch.Tensor, batch: torch.Tensor):
+        out = torch.zeros((_num_graphs(batch), x.size(-1)), dtype=x.dtype, device=x.device)
+        if batch.numel():
+            out.index_add_(0, batch, x)
+        return out
+
+    def global_mean_pool(x: torch.Tensor, batch: torch.Tensor):
+        out = global_add_pool(x, batch)
+        counts = torch.bincount(batch, minlength=out.size(0)).clamp(min=1).to(x.device).to(x.dtype).unsqueeze(-1)
+        return out / counts
+
+    def global_max_pool(x: torch.Tensor, batch: torch.Tensor):
+        n = _num_graphs(batch)
+        if n == 0:
+            return torch.empty((0, x.size(-1)), dtype=x.dtype, device=x.device)
+        outs = []
+        for i in range(n):
+            mask = batch == i
+            if mask.any():
+                outs.append(x[mask].max(dim=0).values)
+            else:
+                outs.append(torch.zeros((x.size(-1),), dtype=x.dtype, device=x.device))
+        return torch.stack(outs, dim=0)
+
+    class MessagePassing(nn.Module):
+        def __init__(self, aggr: str = "add", *args: Any, **kwargs: Any) -> None:
             super().__init__()
+            self.aggr = aggr
 
-        def propagate(self, *args: Any, **kwargs: Any):
-            return missing()
+        def propagate(self, edge_index: torch.Tensor, x: torch.Tensor, edge_weight: Any = None, edge_attr: Any = None):
+            src = edge_index[0]
+            dst = edge_index[1]
+            messages = self.message(x[src], edge_weight=edge_weight, edge_attr=edge_attr)
+            out = torch.zeros((x.size(0), messages.size(-1)), dtype=messages.dtype, device=messages.device)
+            if self.aggr in {"add", "sum"}:
+                if dst.numel():
+                    out.index_add_(0, dst, messages)
+            elif self.aggr == "mean":
+                if dst.numel():
+                    out.index_add_(0, dst, messages)
+                counts = torch.bincount(dst, minlength=x.size(0)).clamp(min=1).to(messages.device).to(messages.dtype).unsqueeze(-1)
+                out = out / counts
+            elif self.aggr == "max":
+                # Simple, robust implementation for evaluation-sized graphs.
+                out[:] = -torch.inf
+                for e in range(dst.numel()):
+                    out[dst[e]] = torch.maximum(out[dst[e]], messages[e])
+                out[out == -torch.inf] = 0
+            else:
+                raise NotImplementedError(f"torch_geometric shim does not support aggr={self.aggr!r}")
+            return out
 
+        def message(self, x_j: torch.Tensor, edge_weight: Any = None, edge_attr: Any = None):
+            return x_j
+
+    utils.degree = degree  # type: ignore[attr-defined]
+    utils.from_networkx = from_networkx  # type: ignore[attr-defined]
     data.Batch = Batch  # type: ignore[attr-defined]
-    utils.degree = missing  # type: ignore[attr-defined]
-    utils.from_networkx = missing  # type: ignore[attr-defined]
-    nn.global_add_pool = missing  # type: ignore[attr-defined]
-    nn.global_mean_pool = missing  # type: ignore[attr-defined]
-    nn.global_max_pool = missing  # type: ignore[attr-defined]
+    data.Data = DataObj  # type: ignore[attr-defined]
+    nn_mod.global_add_pool = global_add_pool  # type: ignore[attr-defined]
+    nn_mod.global_mean_pool = global_mean_pool  # type: ignore[attr-defined]
+    nn_mod.global_max_pool = global_max_pool  # type: ignore[attr-defined]
     conv.MessagePassing = MessagePassing  # type: ignore[attr-defined]
+
+    tg.data = data  # type: ignore[attr-defined]
+    tg.utils = utils  # type: ignore[attr-defined]
+    tg.nn = nn_mod  # type: ignore[attr-defined]
+    nn_mod.conv = conv  # type: ignore[attr-defined]
+
     sys.modules.update({
         "torch_geometric": tg,
         "torch_geometric.data": data,
         "torch_geometric.utils": utils,
-        "torch_geometric.nn": nn,
+        "torch_geometric.nn": nn_mod,
         "torch_geometric.nn.conv": conv,
     })
-    DEPENDENCY_SHIMS["torch_geometric"] = "import stub because gin descriptor is disabled"
+    DEPENDENCY_SHIMS["torch_geometric"] = reason
 
+
+def install_torch_geometric_stub_if_needed(descriptors: Sequence[str], cfg: Mapping[str, Any]) -> None:
+    uses_gin = "gin" in descriptors
+    usable, reason = torch_geometric_is_usable()
+    if usable:
+        return
+    allow_shim = as_bool(cfg.get("allow_torch_geometric_shim"), True)
+    if not allow_shim:
+        raise ImportError(
+            "torch_geometric cannot be imported. This is usually caused by PyG binary wheels "
+            "compiled for a different PyTorch/CUDA version. Install matching torch-scatter, "
+            "torch-sparse, and torch-cluster wheels, or set allow_torch_geometric_shim: true. "
+            f"Import error was: {reason}"
+        )
+    if uses_gin:
+        install_torch_geometric_shim("pure-PyTorch shim because installed torch_geometric is unavailable or ABI-incompatible: " + str(reason))
+    else:
+        install_torch_geometric_shim("import shim because gin descriptor is disabled and installed torch_geometric is unavailable or ABI-incompatible: " + str(reason))
 
 def canonical_descriptors(cfg: Mapping[str, Any]) -> list[str]:
     raw = cfg.get("descriptors") or DEFAULT_DESCRIPTORS
@@ -532,7 +710,7 @@ def canonical_descriptors(cfg: Mapping[str, Any]) -> list[str]:
 
 def prepare_imports(cfg: Mapping[str, Any], descriptors: list[str], classifier_name: str, *, survey_root: Path) -> list[str]:
     install_tabpfn_stub_if_logistic(classifier_name)
-    install_torch_geometric_stub_if_no_gin(descriptors)
+    install_torch_geometric_stub_if_needed(descriptors, cfg)
     needs_orbits = any(d.startswith("orbit") for d in descriptors)
     if importlib.util.find_spec("orbit_count") is None:
         skip_if_unavailable = (

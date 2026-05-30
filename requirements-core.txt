@@ -5,3 +5,4 @@ pandas
 PyYAML
 scikit-learn
 matplotlib
+rich

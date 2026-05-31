@@ -58,6 +58,11 @@ import numpy as np
 import yaml
 
 DEFAULT_DESCRIPTORS = ["orbit4", "orbit5", "clustering", "degree", "spectral", "gin"]
+# Default molecular subset uses official polygraph molecule descriptor classes
+# that do not require external pretrained ChemNet/MolCLR checkpoints. For the
+# full paper-style molecular descriptor set, configure:
+#   molecular_descriptors: [topochemical, morgan_fingerprint, chemnet, molclr, lipinski]
+DEFAULT_MOLECULE_DESCRIPTORS = ["topochemical", "morgan_fingerprint", "lipinski"]
 DEFAULT_METRIC_FILENAME = "polygraphscore_official.json"
 ORBIT_DIMS = {4: 15, 5: 73}
 DEPENDENCY_SHIMS: dict[str, str] = {}
@@ -285,6 +290,26 @@ def normalize_graphs(graphs: Sequence[Any], *, simple: bool = True, relabel: boo
     return out
 
 
+def strip_to_topology(graphs: Sequence[Any]) -> list[Any]:
+    """Return plain NetworkX graphs with all node/edge/graph attributes removed.
+
+    Official generic descriptors do not use benchmark attributes.  Stripping
+    attributes avoids torch_geometric.from_networkx failures when generated
+    graphs carry provenance flags such as graph["grum_valence_pruned"] that
+    reference graphs do not carry.
+    """
+    import networkx as nx
+
+    out = []
+    for graph in graphs:
+        g = nx.Graph(graph)
+        h = nx.Graph()
+        h.add_nodes_from(list(g.nodes()))
+        h.add_edges_from((u, v) for u, v in g.edges())
+        out.append(h)
+    return out
+
+
 def subsample(graphs: Sequence[Any], n: int | None, rng: np.random.Generator) -> list[Any]:
     graphs = list(graphs)
     if n is None or n <= 0 or len(graphs) <= n:
@@ -458,19 +483,36 @@ def install_orbit_count_shim(orca_exec: Path | None) -> None:
     DEPENDENCY_SHIMS["orbit_count"] = f"ORCA shim ({orca_exec})"
 
 
-def install_tabpfn_stub_if_logistic(classifier_name: str) -> None:
-    normalized = classifier_name.lower().replace("_", "-")
-    if normalized not in {"logistic", "logistic-regression", "lr"}:
+def has_real_tabpfn() -> bool:
+    try:
+        importlib_metadata.version("tabpfn")
+        return importlib.util.find_spec("tabpfn") is not None
+    except Exception:
+        return False
+
+
+def install_tabpfn_stub_if_needed(classifier_name: str) -> None:
+    """Allow importing polygraph.metrics.base when TabPFN is absent.
+
+    polygraph-benchmark imports TabPFN at module-import time.  For logistic or
+    auto-fallback runs we do not need a real TabPFN installation, but the import
+    still has to succeed so that PolyGraphDiscrepancy can be used.  If the user
+    explicitly requests TabPFN without installing it, default_classifier() will
+    still raise when called.
+    """
+    if has_real_tabpfn():
         return
-    if importlib.util.find_spec("tabpfn") is not None:
-        return
+    import importlib.machinery as importlib_machinery
+
     tabpfn_mod = types.ModuleType("tabpfn")
     classifier_mod = types.ModuleType("tabpfn.classifier")
+    tabpfn_mod.__spec__ = importlib_machinery.ModuleSpec("tabpfn", loader=None)
+    classifier_mod.__spec__ = importlib_machinery.ModuleSpec("tabpfn.classifier", loader=None)
 
     class MissingTabPFNClassifier:  # pragma: no cover
         @classmethod
         def create_default_for_version(cls, *args: Any, **kwargs: Any):
-            raise ImportError("TabPFN is not installed")
+            raise ImportError("TabPFN is not installed. Use --classifier logistic or install tabpfn>=2.0.9.")
 
     class ModelVersion:
         V2_5 = "V2_5"
@@ -479,7 +521,7 @@ def install_tabpfn_stub_if_logistic(classifier_name: str) -> None:
     classifier_mod.ModelVersion = ModelVersion  # type: ignore[attr-defined]
     sys.modules["tabpfn"] = tabpfn_mod
     sys.modules["tabpfn.classifier"] = classifier_mod
-    DEPENDENCY_SHIMS["tabpfn"] = "import stub for logistic_regression mode"
+    DEPENDENCY_SHIMS["tabpfn"] = f"import stub because real TabPFN is unavailable; classifier_requested={classifier_name}"
 
 
 def torch_geometric_is_usable() -> tuple[bool, str | None]:
@@ -530,6 +572,11 @@ def install_torch_geometric_shim(reason: str) -> None:
     class DataObj:
         def __init__(self, **kwargs: Any) -> None:
             self.__dict__.update(kwargs)
+            if not hasattr(self, "num_nodes") and getattr(self, "x", None) is not None:
+                try:
+                    self.num_nodes = int(self.x.size(0))
+                except Exception:
+                    pass
 
         def to(self, device: str | torch.device):
             for key, value in list(self.__dict__.items()):
@@ -638,7 +685,10 @@ def install_torch_geometric_shim(reason: str) -> None:
         def propagate(self, edge_index: torch.Tensor, x: torch.Tensor, edge_weight: Any = None, edge_attr: Any = None):
             src = edge_index[0]
             dst = edge_index[1]
-            messages = self.message(x[src], edge_weight=edge_weight, edge_attr=edge_attr)
+            try:
+                messages = self.message(x[src], edge_weight=edge_weight, edge_attr=edge_attr)
+            except TypeError:
+                messages = self.message(x[src], edge_attr=edge_attr)
             out = torch.zeros((x.size(0), messages.size(-1)), dtype=messages.dtype, device=messages.device)
             if self.aggr in {"add", "sum"}:
                 if dst.numel():
@@ -661,13 +711,41 @@ def install_torch_geometric_shim(reason: str) -> None:
         def message(self, x_j: torch.Tensor, edge_weight: Any = None, edge_attr: Any = None):
             return x_j
 
+    def add_self_loops(edge_index: torch.Tensor, num_nodes: int | None = None, *args: Any, **kwargs: Any):
+        if num_nodes is None:
+            num_nodes = int(edge_index.max().item()) + 1 if edge_index.numel() else 0
+        loops = torch.arange(num_nodes, dtype=torch.long, device=edge_index.device).view(1, -1).repeat(2, 1)
+        return torch.cat([edge_index, loops], dim=1), None
+
+    def is_undirected(edge_index: torch.Tensor, *args: Any, **kwargs: Any) -> bool:
+        if edge_index.numel() == 0:
+            return True
+        pairs = {(int(u), int(v)) for u, v in edge_index.t().detach().cpu().tolist()}
+        return all((v, u) in pairs for u, v in pairs)
+
+    def to_networkx(data_obj: Any, to_undirected: bool = False, *args: Any, **kwargs: Any):
+        import networkx as nx
+        g = nx.Graph() if to_undirected else nx.DiGraph()
+        n = int(getattr(data_obj, "num_nodes", 0) or (data_obj.x.size(0) if getattr(data_obj, "x", None) is not None else 0))
+        g.add_nodes_from(range(n))
+        edge_index = getattr(data_obj, "edge_index", None)
+        if edge_index is not None and edge_index.numel():
+            for u, v in edge_index.t().detach().cpu().tolist():
+                if int(u) != int(v):
+                    g.add_edge(int(u), int(v))
+        return g
+
     utils.degree = degree  # type: ignore[attr-defined]
     utils.from_networkx = from_networkx  # type: ignore[attr-defined]
+    utils.add_self_loops = add_self_loops  # type: ignore[attr-defined]
+    utils.is_undirected = is_undirected  # type: ignore[attr-defined]
+    utils.to_networkx = to_networkx  # type: ignore[attr-defined]
     data.Batch = Batch  # type: ignore[attr-defined]
     data.Data = DataObj  # type: ignore[attr-defined]
     nn_mod.global_add_pool = global_add_pool  # type: ignore[attr-defined]
     nn_mod.global_mean_pool = global_mean_pool  # type: ignore[attr-defined]
     nn_mod.global_max_pool = global_max_pool  # type: ignore[attr-defined]
+    nn_mod.MessagePassing = MessagePassing  # type: ignore[attr-defined]
     conv.MessagePassing = MessagePassing  # type: ignore[attr-defined]
 
     tg.data = data  # type: ignore[attr-defined]
@@ -703,6 +781,60 @@ def install_torch_geometric_stub_if_needed(descriptors: Sequence[str], cfg: Mapp
     else:
         install_torch_geometric_shim("import shim because gin descriptor is disabled and installed torch_geometric is unavailable or ABI-incompatible: " + str(reason))
 
+def canonical_molecular_descriptors(cfg: Mapping[str, Any]) -> list[str]:
+    raw = cfg.get("molecular_descriptors") or DEFAULT_MOLECULE_DESCRIPTORS
+    raw_names = [raw] if isinstance(raw, str) else list(raw)
+    out: list[str] = []
+    for name in map(lambda x: str(x).lower().replace("-", "_"), raw_names):
+        if name in {"topo", "topological", "topochemical", "topochemical_descriptor"}:
+            out.append("topochemical")
+        elif name in {"morgan", "fingerprint", "morgan_fingerprint", "morgan_fingerprint_descriptor"}:
+            out.append("morgan_fingerprint")
+        elif name in {"rdkit_fingerprint", "rdkitfp"}:
+            out.append("rdkit_fingerprint")
+        elif name in {"chemnet", "chemnet_descriptor"}:
+            out.append("chemnet")
+        elif name in {"molclr", "molclr_descriptor"}:
+            out.append("molclr")
+        elif name in {"lipinski", "lipinski_descriptor"}:
+            out.append("lipinski")
+        else:
+            raise ValueError(f"Unknown molecular descriptor {name!r}")
+    return list(dict.fromkeys(out))
+
+
+def install_fcd_stub_if_needed(molecular_descriptor_names: Sequence[str]) -> None:
+    """Allow importing official molecule_descriptors without fcd when unused.
+
+    polygraph.utils.descriptors.molecule_descriptors imports fcd at module import
+    time.  Topochemical, Morgan, and Lipinski descriptors do not use fcd, so we
+    provide a stub unless the ChemNet descriptor is actually requested.
+    """
+    if importlib.util.find_spec("fcd") is not None:
+        return
+    if "chemnet" in {str(x).lower() for x in molecular_descriptor_names}:
+        raise ImportError(
+            "The official ChemNet molecular descriptor requires the 'fcd' package. "
+            "Install fcd or remove 'chemnet' from molecular_descriptors."
+        )
+    import importlib.machinery as importlib_machinery
+
+    fcd_pkg = types.ModuleType("fcd")
+    fcd_mod = types.ModuleType("fcd.fcd")
+    fcd_pkg.__spec__ = importlib_machinery.ModuleSpec("fcd", loader=None)
+    fcd_mod.__spec__ = importlib_machinery.ModuleSpec("fcd.fcd", loader=None)
+
+    def _missing(*args: Any, **kwargs: Any):
+        raise ImportError("The 'fcd' package is required for the ChemNet descriptor.")
+
+    fcd_mod.get_predictions = _missing  # type: ignore[attr-defined]
+    fcd_mod.load_ref_model = _missing  # type: ignore[attr-defined]
+    fcd_pkg.fcd = fcd_mod  # type: ignore[attr-defined]
+    sys.modules.setdefault("fcd", fcd_pkg)
+    sys.modules.setdefault("fcd.fcd", fcd_mod)
+    DEPENDENCY_SHIMS["fcd"] = "import stub because ChemNet descriptor is disabled"
+
+
 def canonical_descriptors(cfg: Mapping[str, Any]) -> list[str]:
     raw = cfg.get("descriptors") or DEFAULT_DESCRIPTORS
     raw_names = [raw] if isinstance(raw, str) else list(raw)
@@ -730,7 +862,7 @@ def canonical_descriptors(cfg: Mapping[str, Any]) -> list[str]:
 
 
 def prepare_imports(cfg: Mapping[str, Any], descriptors: list[str], classifier_name: str, *, survey_root: Path) -> list[str]:
-    install_tabpfn_stub_if_logistic(classifier_name)
+    install_tabpfn_stub_if_needed(classifier_name)
     install_torch_geometric_stub_if_needed(descriptors, cfg)
     needs_orbits = any(d.startswith("orbit") for d in descriptors)
     if importlib.util.find_spec("orbit_count") is None:
@@ -853,6 +985,203 @@ class PositiveClassProbabilityAdapter:
         return getattr(self.base, name)
 
 
+
+def install_appdirs_stub_if_needed() -> None:
+    if importlib.util.find_spec("appdirs") is not None:
+        return
+    import importlib.machinery as importlib_machinery
+
+    mod = types.ModuleType("appdirs")
+    mod.__spec__ = importlib_machinery.ModuleSpec("appdirs", loader=None)
+
+    def user_cache_dir(appname: str | None = None, appauthor: str | None = None, *args: Any, **kwargs: Any) -> str:
+        base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+        return str(base / (appname or "polygraph"))
+
+    mod.user_cache_dir = user_cache_dir  # type: ignore[attr-defined]
+    sys.modules.setdefault("appdirs", mod)
+    DEPENDENCY_SHIMS["appdirs"] = "minimal user_cache_dir stub for source-tree molecule descriptor imports"
+
+def import_molecule_descriptor_classes(names: Sequence[str]) -> dict[str, Any]:
+    install_fcd_stub_if_needed(names)
+    install_appdirs_stub_if_needed()
+    from polygraph.utils.descriptors.molecule_descriptors import (
+        TopoChemicalDescriptor,
+        FingerprintDescriptor,
+        LipinskiDescriptor,
+        ChemNetDescriptor,
+        MolCLRDescriptor,
+    )
+
+    return {
+        "TopoChemicalDescriptor": TopoChemicalDescriptor,
+        "FingerprintDescriptor": FingerprintDescriptor,
+        "LipinskiDescriptor": LipinskiDescriptor,
+        "ChemNetDescriptor": ChemNetDescriptor,
+        "MolCLRDescriptor": MolCLRDescriptor,
+    }
+
+
+def make_molecular_descriptors(names: Sequence[str], cfg: Mapping[str, Any]) -> dict[str, Any]:
+    classes = import_molecule_descriptor_classes(names)
+    descriptors: dict[str, Any] = {}
+    for name in names:
+        if name == "topochemical":
+            descriptors[name] = classes["TopoChemicalDescriptor"]()
+        elif name == "morgan_fingerprint":
+            descriptors[name] = classes["FingerprintDescriptor"](algorithm="morgan", dim=int(cfg.get("morgan_dim", cfg.get("molecular_fingerprint_dim", 128))))
+        elif name == "rdkit_fingerprint":
+            descriptors[name] = classes["FingerprintDescriptor"](algorithm="rdkit", dim=int(cfg.get("rdkit_fingerprint_dim", cfg.get("molecular_fingerprint_dim", 128))))
+        elif name == "lipinski":
+            descriptors[name] = classes["LipinskiDescriptor"]()
+        elif name == "chemnet":
+            descriptors[name] = classes["ChemNetDescriptor"](dim=int(cfg.get("chemnet_dim", 128)))
+        elif name == "molclr":
+            descriptors[name] = classes["MolCLRDescriptor"](dim=int(cfg.get("molclr_dim", 128)), batch_size=int(cfg.get("molclr_batch_size", 128)))
+        else:
+            raise ValueError(f"Unknown molecular descriptor {name!r}")
+    if not descriptors:
+        raise ValueError("Molecular descriptor set is empty")
+    return descriptors
+
+
+def pgs_domain_for_dataset(dataset: str, cfg: Mapping[str, Any]) -> str:
+    requested = str(cfg.get("pgs_domain", cfg.get("domain", "auto"))).strip().lower()
+    if requested in {"molecule", "molecular", "mol", "rdkit"}:
+        return "molecular"
+    if requested in {"generic", "graph", "standard", "topology"}:
+        return "generic"
+    if requested not in {"auto", ""}:
+        raise ValueError("pgs_domain/domain must be auto, generic, or molecular")
+    molecular = {str(x).lower() for x in (cfg.get("molecular_datasets") or [])}
+    molecular |= {"qm9", "zinc", "moses", "guacamol"}
+    return "molecular" if dataset.lower() in molecular else "generic"
+
+
+def add_survey_src_to_path(root: Path) -> None:
+    src = root / "src"
+    if src.exists() and str(src) not in sys.path:
+        sys.path.insert(0, str(src))
+
+
+def read_dataset_yaml(root: Path, dataset: str) -> dict[str, Any]:
+    path = root / "configs" / "datasets" / f"{dataset}.yaml"
+    if path.exists():
+        try:
+            return load_yaml(path)
+        except Exception:
+            return {}
+    return {}
+
+
+def encoded_atomic_mapping(root: Path, dataset: str) -> tuple[list[str], str | None]:
+    cfg = read_dataset_yaml(root, dataset)
+    mapping = cfg.get("rdkit_atomic_number_mapping")
+    if mapping is None:
+        return [], None
+
+    def encode(value: Any) -> str:
+        if isinstance(value, bool):
+            return str(value)
+        if isinstance(value, (int, float, np.integer, np.floating)) and float(value).is_integer():
+            return f"atomic_number={int(value)}"
+        return str(value)
+
+    if isinstance(mapping, Mapping):
+        parsed: dict[int, str] = {}
+        for key, value in mapping.items():
+            try:
+                parsed[int(key)] = encode(value)
+            except Exception:
+                continue
+        if not parsed:
+            return [], None
+        values = [""] * (max(parsed) + 1)
+        for key, value in parsed.items():
+            values[key] = value
+        return values, f"configs/datasets/{dataset}.yaml:rdkit_atomic_number_mapping"
+    if isinstance(mapping, Sequence) and not isinstance(mapping, (str, bytes, bytearray)):
+        return [encode(v) for v in mapping], f"configs/datasets/{dataset}.yaml:rdkit_atomic_number_mapping"
+    return [], None
+
+
+def metadata_raw_attribute_values(root: Path, dataset: str, dataset_root: str) -> tuple[list[str], list[str]]:
+    try:
+        metadata_file = dataset_split_path(root, dataset_root, dataset, "train").parent / "metadata.json"
+        meta = json.loads(metadata_file.read_text(encoding="utf-8"))
+        raw_stats = ((meta.get("graph_attributes") or {}).get("all_attribute_stats_raw") or {})
+        return [str(v) for v in raw_stats.get("node_label_values", [])], [str(v) for v in raw_stats.get("edge_label_values", [])]
+    except Exception:
+        return [], []
+
+
+def convert_graphs_to_rdkit_mols(
+    graphs: Sequence[Any],
+    *,
+    dataset: str,
+    root: Path,
+    dataset_root: str,
+    cfg: Mapping[str, Any],
+    side: str,
+) -> tuple[list[Any], dict[str, Any]]:
+    add_survey_src_to_path(root)
+    import networkx as nx
+    from empirical_comparison.metrics.molecular.rdkit_validity import graph_to_rdkit_mol
+
+    node_label_attr = str(cfg.get("node_label_attr", "node_label"))
+    edge_label_attr = str(cfg.get("edge_label_attr", "edge_type"))
+    explicit_node_values, explicit_source = encoded_atomic_mapping(root, dataset)
+    metadata_node_values, metadata_edge_values = metadata_raw_attribute_values(root, dataset, dataset_root)
+    raw_node_values = explicit_node_values or metadata_node_values
+    raw_edge_values = metadata_edge_values
+
+    mols: list[Any] = []
+    failures = 0
+    empty = 0
+    self_loops = 0
+    for graph in graphs:
+        g = nx.Graph(graph)
+        if g.number_of_nodes() == 0:
+            empty += 1
+            failures += 1
+            continue
+        if any(u == v for u, v in g.edges()):
+            self_loops += 1
+        try:
+            mol = graph_to_rdkit_mol(
+                g,
+                node_label_attr=node_label_attr,
+                edge_label_attr=edge_label_attr,
+                raw_node_label_values=raw_node_values,
+                raw_edge_label_values=raw_edge_values,
+                dataset=dataset,
+                sanitize=as_bool(cfg.get("molecular_sanitize", True), True),
+            )
+        except Exception:
+            mol = None
+        if mol is None:
+            failures += 1
+        else:
+            mols.append(mol)
+
+    diagnostics = {
+        f"{side}_input_graphs": len(graphs),
+        f"{side}_valid_molecules": len(mols),
+        f"{side}_invalid_or_unconvertible": failures,
+        f"{side}_empty_graphs": empty,
+        f"{side}_graphs_with_self_loops": self_loops,
+        "node_label_attr": node_label_attr,
+        "edge_label_attr": edge_label_attr,
+        "raw_node_label_values_source": explicit_source or ("dataset_metadata" if metadata_node_values else None),
+        "raw_edge_label_values_source": "dataset_metadata" if metadata_edge_values else None,
+        "zinc_mapping_required_note": (
+            "ZINC PyG atom_type labels are categorical. Provide rdkit_atomic_number_mapping or atomic_number/z node attrs for molecular PGS."
+            if dataset.lower() == "zinc" and not explicit_node_values else None
+        ),
+    }
+    return mols, diagnostics
+
+
 def make_classifier(name: str, cfg: Mapping[str, Any], seed: int, poly: Mapping[str, Any]) -> tuple[Any | None, str]:
     normalized = name.lower().replace("_", "-")
     if normalized in {"official-default", "default", "tabpfn", "tabpfn-v25"}:
@@ -863,12 +1192,12 @@ def make_classifier(name: str, cfg: Mapping[str, Any], seed: int, poly: Mapping[
         base = LogisticRegression(max_iter=int(cfg.get("logistic_max_iter", 5000)), random_state=seed)
         return PositiveClassProbabilityAdapter(base), "sklearn LogisticRegression + P(y=1) probability adapter"
     if normalized == "auto":
-        if importlib.util.find_spec("tabpfn") is not None:
+        if has_real_tabpfn():
             return PositiveClassProbabilityAdapter(poly["default_classifier"]()), "polygraph-benchmark default TabPFN(auto) + P(y=1) probability adapter"
         from sklearn.linear_model import LogisticRegression
 
         base = LogisticRegression(max_iter=int(cfg.get("logistic_max_iter", 5000)), random_state=seed)
-        return PositiveClassProbabilityAdapter(base), "sklearn LogisticRegression(auto fallback) + P(y=1) probability adapter"
+        return PositiveClassProbabilityAdapter(base), "sklearn LogisticRegression(auto fallback; TabPFN unavailable) + P(y=1) probability adapter"
     raise ValueError(f"Unknown classifier {name!r}")
 
 
@@ -956,7 +1285,7 @@ def compute_pgs(poly: Mapping[str, Any], ref: Sequence[Any], gen: Sequence[Any],
 
 def package_versions() -> dict[str, str | None]:
     out = {}
-    for name in ["polygraph-benchmark", "orbit-count", "tabpfn", "torch-geometric", "networkx", "numpy", "scikit-learn"]:
+    for name in ["polygraph-benchmark", "orbit-count", "tabpfn", "torch-geometric", "networkx", "numpy", "scikit-learn", "rdkit", "fcd"]:
         try:
             out[name] = importlib_metadata.version(name)
         except Exception:
@@ -981,20 +1310,51 @@ def evaluate_one(dataset: str, model: str, run_id: int | None, cfg: Mapping[str,
     if max_graphs is not None:
         max_ref = min(max_ref, max_graphs) if max_ref is not None else max_graphs
         max_gen = min(max_gen, max_graphs) if max_gen is not None else max_graphs
-    ref, gen = balance_graphs(ref_graphs, gen_graphs, max_ref=max_ref, max_gen=max_gen, seed=seed)
-    descriptors = make_descriptors(poly, descriptors_names, cfg, seed)
+
+    domain = pgs_domain_for_dataset(dataset, cfg)
+    molecular_diagnostics: dict[str, Any] = {}
+    if domain == "molecular":
+        # First cap graph count for runtime, then convert/filter to valid RDKit
+        # molecules, as required by molecule descriptors.
+        rng = np.random.default_rng(seed)
+        ref_pre = subsample(ref_graphs, max_ref, rng)
+        gen_pre = subsample(gen_graphs, max_gen, rng)
+        ref_mols, ref_diag = convert_graphs_to_rdkit_mols(ref_pre, dataset=dataset, root=root, dataset_root=dataset_root, cfg=cfg, side="reference")
+        gen_mols, gen_diag = convert_graphs_to_rdkit_mols(gen_pre, dataset=dataset, root=root, dataset_root=dataset_root, cfg=cfg, side="generated")
+        molecular_diagnostics.update(ref_diag)
+        molecular_diagnostics.update(gen_diag)
+        if not ref_mols:
+            raise ValueError(f"No valid reference RDKit molecules could be built for dataset={dataset}. For ZINC, provide rdkit_atomic_number_mapping or atomic_number/z node attrs.")
+        if not gen_mols:
+            raise ValueError(f"No valid generated RDKit molecules could be built for dataset={dataset} model={model} run_id={run_id}. Molecular PGS filters invalid molecules before scoring.")
+        n = min(len(ref_mols), len(gen_mols))
+        if n < 8:
+            raise ValueError(f"Official molecular PGS needs enough valid molecules for fit/test plus 4-fold CV; got reference={len(ref_mols)}, generated={len(gen_mols)}")
+        ref = subsample(ref_mols, n, rng)
+        gen = subsample(gen_mols, n, rng)
+        molecular_names = canonical_molecular_descriptors(cfg)
+        descriptors = make_molecular_descriptors(molecular_names, cfg)
+    else:
+        ref, gen = balance_graphs(ref_graphs, gen_graphs, max_ref=max_ref, max_gen=max_gen, seed=seed)
+        if as_bool(cfg.get("strip_attributes_for_generic", True), True):
+            ref = strip_to_topology(ref)
+            gen = strip_to_topology(gen)
+        descriptors = make_descriptors(poly, descriptors_names, cfg, seed)
+
     results, protocol_extra = compute_pgs(poly, ref, gen, descriptors, classifier, cfg, seed)
     numeric_scores = [float(v) for k, v in results.items() if k.startswith("pgs_subscore_") and isinstance(v, (int, float, np.number))]
     result_diagnostics = {}
     if numeric_scores and all(abs(v) < 1e-12 for v in numeric_scores):
         result_diagnostics["all_descriptor_scores_zero"] = True
         result_diagnostics["hint"] = "All descriptor scores are exactly zero. This can be genuine, but it often indicates classifier failures swallowed by official PolyGraph or a predict_proba class-column ordering issue. This wrapper uses a P(y=1) adapter to guard against the class-column issue."
+    if molecular_diagnostics:
+        result_diagnostics["molecular_filtering"] = molecular_diagnostics
     payload = {
         "dataset": dataset,
         "model": model,
         "run_id": run_id,
         "metric_family": "polygraphscore_official",
-        "metric_name": "PolyGraphScore-JS" if str(cfg.get("variant", "jsd")).lower() == "jsd" else "PolyGraphScore-TV",
+        "metric_name": ("PolyGraphScore-JS-Molecule" if domain == "molecular" else "PolyGraphScore-JS") if str(cfg.get("variant", "jsd")).lower() == "jsd" else "PolyGraphScore-TV",
         "implementation_name_in_package": "PolyGraphDiscrepancy",
         "runtime_seconds": time.perf_counter() - started,
         "reference_path": str(ref_path),
@@ -1004,21 +1364,26 @@ def evaluate_one(dataset: str, model: str, run_id: int | None, cfg: Mapping[str,
             "source_config_key": cfg.get("_source_config_key"),
             "reference_split": reference_split,
             "variant": str(cfg.get("variant", "jsd")),
+            "descriptor_domain": domain,
             "descriptors": list(descriptors.keys()),
             "classifier_requested": str(cfg.get("classifier", "official_default")),
             "classifier_resolved": classifier_resolved,
             "classifier_object": "polygraph-benchmark default" if classifier is None else classifier.__class__.__name__,
             "num_reference_graphs_loaded": len(ref_raw),
             "num_generated_graphs_loaded": len(gen_raw),
+            "num_reference_items_used": len(ref),
+            "num_generated_items_used": len(gen),
             "num_reference_graphs_used": len(ref),
             "num_generated_graphs_used": len(gen),
             "official_internal_fit_per_class": len(ref) // 2,
             "official_internal_test_per_class": len(ref) - len(ref) // 2,
             "official_cv_folds": 4,
+            "cv_folds_requested": cfg.get("cv_folds"),
             "seed": seed,
             "fit_test_and_cv": "Delegated to official polygraph-benchmark: fit/test split, 4-fold stratified CV descriptor selection on fit, and held-out test score.",
             "orbit_count_fallback": "orbit_count" in DEPENDENCY_SHIMS,
             "orca_exec": DEPENDENCY_SHIMS.get("orbit_count"),
+            "strip_attributes_for_generic": as_bool(cfg.get("strip_attributes_for_generic", True), True),
             **protocol_extra,
         },
         "result_diagnostics": result_diagnostics,
@@ -1028,9 +1393,8 @@ def evaluate_one(dataset: str, model: str, run_id: int | None, cfg: Mapping[str,
     }
     if output_path is not None:
         save_json(payload, output_path)
-        log("saved dataset=%s model=%s run_id=%s pgs=%.6f -> %s", dataset, model, run_id, float(results.get("pgs", float("nan"))), output_path)
+        log("saved dataset=%s model=%s run_id=%s domain=%s pgs=%.6f -> %s", dataset, model, run_id, domain, float(results.get("pgs", float("nan"))), output_path)
     return payload
-
 
 def aggregate_payloads(payloads: Sequence[dict[str, Any]]) -> dict[str, Any]:
     values: dict[str, list[float]] = defaultdict(list)
@@ -1082,6 +1446,10 @@ def merge_cfg(args: argparse.Namespace, experiment_cfg: Mapping[str, Any]) -> di
     cfg.setdefault("mode", cfg.get("estimate", "point"))
     cfg.setdefault("estimate", cfg.get("mode", "point"))
     cfg.setdefault("descriptors", DEFAULT_DESCRIPTORS)
+    cfg.setdefault("molecular_descriptors", DEFAULT_MOLECULE_DESCRIPTORS)
+    cfg.setdefault("pgs_domain", cfg.get("domain", "auto"))
+    cfg.setdefault("molecular_datasets", experiment_cfg.get("molecular_datasets", ["qm9", "zinc"]))
+    cfg.setdefault("strip_attributes_for_generic", True)
     cfg.setdefault("dataset_root", "outputs/datasets")
     cfg.setdefault("samples_root", "outputs/samples")
     cfg.setdefault("metrics_root", "outputs/metrics")
@@ -1120,6 +1488,16 @@ def merge_cfg(args: argparse.Namespace, experiment_cfg: Mapping[str, Any]) -> di
         "edge_label_attr",
         "edge_feature_attr",
         "graph_label_attr",
+        "pgs_domain",
+        "domain",
+        "molecular_sanitize",
+        "molecular_fingerprint_dim",
+        "morgan_dim",
+        "rdkit_fingerprint_dim",
+        "chemnet_dim",
+        "molclr_dim",
+        "molclr_batch_size",
+        "strip_attributes_for_generic",
     ]:
         value = getattr(args, key, None)
         if value is not None:
@@ -1128,6 +1506,8 @@ def merge_cfg(args: argparse.Namespace, experiment_cfg: Mapping[str, Any]) -> di
         cfg["gin_device"] = args.device
     if args.descriptors:
         cfg["descriptors"] = args.descriptors
+    if getattr(args, "molecular_descriptors", None):
+        cfg["molecular_descriptors"] = args.molecular_descriptors
     if args.skip_orbits or getattr(args, "skip_orbit", False):
         cfg["skip_orbits"] = True
     if getattr(args, "no_attribute_descriptor", False):
@@ -1161,6 +1541,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--estimate", choices=["point", "interval", "subsampling"], default=None)
     p.add_argument("--mode", dest="estimate", choices=["point", "interval", "subsampling"], default=None, help="Alias for --estimate")
     p.add_argument("--descriptors", nargs="+", default=None)
+    p.add_argument("--molecular-descriptors", nargs="+", default=None, help="Official molecule descriptors for QM9/ZINC, e.g. topochemical morgan_fingerprint lipinski chemnet molclr")
+    p.add_argument("--pgs-domain", choices=["auto", "generic", "molecular"], default=None, help="auto uses molecular descriptors for datasets listed in molecular_datasets")
+    p.add_argument("--domain", dest="pgs_domain", choices=["auto", "generic", "molecular"], default=None, help="Alias for --pgs-domain")
     p.add_argument("--skip-orbit", action="store_true", help="Backward-compatible alias for --skip-orbits")
     p.add_argument("--skip-orbits", action="store_true")
     p.add_argument("--skip-gin", action="store_true")
@@ -1207,6 +1590,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     random.seed(seed)
     np.random.seed(seed)
     descriptors = canonical_descriptors(cfg)
+    # When the selected datasets are all molecular, generic orbit descriptors are
+    # not used; avoid requiring orbit-count/ORCA just to import the package.
+    if datasets and all(pgs_domain_for_dataset(d, cfg) == "molecular" for d in datasets):
+        descriptors = [d for d in descriptors if not d.startswith("orbit")]
     filename = str(cfg.get("metric_filename", DEFAULT_METRIC_FILENAME))
     metrics_root = str(cfg.get("metrics_root", "outputs/metrics"))
     force = bool(args.force or experiment_cfg.get("force", False) or cfg.get("force", False))

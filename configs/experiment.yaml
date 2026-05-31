@@ -49,16 +49,51 @@ metrics:
   classifier:
     enabled: true
     reference_split: test
-    classifier: auto
     metric: pgs_js_distance
+    implementation: official_polygraph_benchmark
+    polygraph_root: null
+    orca_exec: null
+    mode: interval
+    variant: jsd
+    classifier: tabpfn
+    descriptors:
+    - orbit4
+    - orbit5
+    - clustering
+    - degree
+    - spectral
+    - gin
+    skip_orbits: false
+    skip_gin: false
+    include_attribute_descriptor: false
+    strip_attributes_for_generic: true
+    num_splits: 1
     cv_folds: 4
-    skip_orbits: true
-    num_splits: 3
+    num_samples: 10
+    subsample_size: null
+    pgs_domain: auto
+    molecular_datasets:
+    - qm9
+    - zinc
+    molecular_descriptors:
+    - topochemical
+    - morgan_fingerprint
+    - lipinski
+    molecular_sanitize: true
+    molecular_fingerprint_dim: 128
+    allow_orbit_count_fallback: true
+    skip_orbits_if_unavailable: false
+    skip_orbits_when_unavailable: false
+    auto_compile_orca: false
+    allow_torch_geometric_shim: true
+    gin_device: cpu
+    gin_seed: 42
+    logistic_max_iter: 5000
   polygraphscore_official:
     enabled: false
     polygraph_root: null
     reference_split: test
-    mode: point
+    mode: interval
     variant: jsd
     classifier: tabpfn
     descriptors:
@@ -77,5 +112,15 @@ metrics:
     skip_orbits_if_unavailable: false
     allow_orbit_count_fallback: true
     orca_exec: null
-    auto_compile_orca: true
+    auto_compile_orca: false
     skip_gin: false
+    allow_torch_geometric_shim: true
+    pgs_domain: auto
+    molecular_datasets:
+    - qm9
+    - zinc
+    molecular_descriptors:
+    - topochemical
+    - morgan_fingerprint
+    - lipinski
+    strip_attributes_for_generic: true

@@ -1,8 +1,64 @@
-metric: polygraphscore
-classifier: auto  # auto = TabPFN if installed, otherwise standardized logistic regression fallback
+# Classifier-based graph-generation metric.
+#
+# This block now mirrors the original polygraph-benchmark protocol instead of
+# the old local reimplementation.  scripts/evaluate_classifier_metrics.py keeps
+# the historical output name classifier_metrics.json, but delegates the score to
+# polygraph-benchmark's PolyGraphDiscrepancy / PolyGraphDiscrepancyInterval.
+#
+# Required for paper-style generic PGS:
+#   export POLYGRAPH_REPO=/absolute/path/to/polygraph-benchmark
+#   export ORCA_EXEC=/absolute/path/to/orca
+
+metric: pgs_js_distance
+implementation: official_polygraph_benchmark
+polygraph_root: null   # resolved from POLYGRAPH_REPO
+orca_exec: null        # resolved from ORCA_EXEC
 reference_split: test
-num_splits: 3
+
+# Original benchmark setting: StandardPGDInterval with 10 subsamples.  The
+# default subsample_size follows polygraph-benchmark: min(n_per_side / 2, 2048).
+mode: interval
+variant: jsd
+num_samples: 10
+subsample_size: null
+
+# Kept for point-mode compatibility only; Algorithm 1 itself uses 4-fold CV
+# internally.  In interval mode, use num_samples/subsample_size instead.
+num_splits: 1
 cv_folds: 4
+
+# Paper-style classifier.  Use `auto` or `logistic` only for smoke tests when
+# TabPFN is not available.
+classifier: tabpfn
+
+# Generic descriptor set from StandardPGD / Algorithm 1.
+descriptors: [orbit4, orbit5, clustering, degree, spectral, gin]
 skip_orbits: false
-include_attribute_descriptor: true
+skip_gin: false
+
+# The previous local implementation added a benchmark-specific attributes
+# descriptor by default.  That is not part of the official generic PGS and can
+# detect generation/postprocessing artifacts, so it is disabled.
+include_attribute_descriptor: false
+strip_attributes_for_generic: true
+
+# Molecular datasets use official molecule descriptors after RDKit conversion.
+pgs_domain: auto
+molecular_datasets: [qm9, zinc]
+# Dependency-light default.  For strict molecule-paper reproduction, install
+# the ChemNet/FCD and MolCLR dependencies/checkpoints and use:
+# molecular_descriptors: [topochemical, morgan_fingerprint, chemnet, molclr, lipinski]
+molecular_descriptors: [topochemical, morgan_fingerprint, lipinski]
+molecular_sanitize: true
+molecular_fingerprint_dim: 128
+
+allow_orbit_count_fallback: true
+skip_orbits_if_unavailable: false
+skip_orbits_when_unavailable: false
+auto_compile_orca: false
+allow_torch_geometric_shim: true
+
+gin_device: cpu
+gin_seed: 42
+logistic_max_iter: 5000
 interpretation: PGS is a held-out JS-distance lower-bound estimate in [0,1]; lower is better.

@@ -443,7 +443,10 @@ def find_orca(value: str | None, *, survey_root: Path, auto_compile: bool) -> Pa
 
 
 def install_orbit_count_shim(orca_exec: Path | None) -> None:
+    import importlib.machinery as importlib_machinery
+
     mod = types.ModuleType("orbit_count")
+    mod.__spec__ = importlib_machinery.ModuleSpec("orbit_count", loader=None)
 
     def count_one(graph: Any, graphlet_size: int) -> np.ndarray:
         if orca_exec is None:

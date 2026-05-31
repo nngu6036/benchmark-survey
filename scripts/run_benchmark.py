@@ -244,14 +244,46 @@ def main() -> None:
                     ]
                     if actual_run_id is not None:
                         clf_cmd += ["--run-id", str(actual_run_id)]
+                    # Propagate the official PolyGraphScore/classifier config.
+                    # Older versions only forwarded num_splits/cv_folds/classifier,
+                    # which meant descriptors, interval mode, molecule mode, and
+                    # attribute-descriptor disabling in YAML were silently ignored.
+                    if "mode" in classifier_cfg:
+                        clf_cmd += ["--mode", str(classifier_cfg["mode"])]
+                    elif "estimate" in classifier_cfg:
+                        clf_cmd += ["--mode", str(classifier_cfg["estimate"])]
+                    if "variant" in classifier_cfg:
+                        clf_cmd += ["--variant", str(classifier_cfg["variant"])]
                     if "num_splits" in classifier_cfg:
                         clf_cmd += ["--num-splits", str(classifier_cfg["num_splits"])]
+                    if "num_samples" in classifier_cfg and classifier_cfg.get("num_samples") is not None:
+                        clf_cmd += ["--num-samples", str(classifier_cfg["num_samples"])]
+                    if "subsample_size" in classifier_cfg and classifier_cfg.get("subsample_size") is not None:
+                        clf_cmd += ["--subsample-size", str(classifier_cfg["subsample_size"])]
                     if "cv_folds" in classifier_cfg:
                         clf_cmd += ["--cv-folds", str(classifier_cfg["cv_folds"])]
                     if "classifier" in classifier_cfg:
                         clf_cmd += ["--classifier", str(classifier_cfg["classifier"])]
+                    if classifier_cfg.get("descriptors"):
+                        clf_cmd += ["--descriptors", *map(str, classifier_cfg["descriptors"])]
+                    if classifier_cfg.get("molecular_descriptors"):
+                        clf_cmd += ["--molecular-descriptors", *map(str, classifier_cfg["molecular_descriptors"])]
+                    if classifier_cfg.get("pgs_domain") or classifier_cfg.get("domain"):
+                        clf_cmd += ["--pgs-domain", str(classifier_cfg.get("pgs_domain", classifier_cfg.get("domain")))]
+                    if classifier_cfg.get("gin_device"):
+                        clf_cmd += ["--gin-device", str(classifier_cfg["gin_device"])]
+                    if classifier_cfg.get("orca_exec"):
+                        clf_cmd += ["--orca-exec", str(classifier_cfg["orca_exec"])]
+                    if classifier_cfg.get("logistic_max_iter") is not None:
+                        clf_cmd += ["--logistic-max-iter", str(classifier_cfg["logistic_max_iter"])]
                     if args.skip_orbit or classifier_cfg.get("skip_orbits", False) or classifier_cfg.get("skip_orbit", False):
                         clf_cmd.append("--skip-orbits")
+                    if classifier_cfg.get("skip_gin", False):
+                        clf_cmd.append("--skip-gin")
+                    if classifier_cfg.get("include_attribute_descriptor") is False or classifier_cfg.get("no_attribute_descriptor", False):
+                        clf_cmd.append("--no-attribute-descriptor")
+                    if args.force or cfg.get("force", False):
+                        clf_cmd.append("--force")
                     commands.append(clf_cmd)
 
                 if _enabled(metrics_cfg, "polygraphscore_official", False) or _enabled(metrics_cfg, "official_polygraphscore", False) or _enabled(metrics_cfg, "pgs_official", False):

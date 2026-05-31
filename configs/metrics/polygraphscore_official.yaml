@@ -21,7 +21,7 @@ polygraphscore_official:
 
   # Paper-style PGS-JS. The official package calls the class
   # PolyGraphDiscrepancy; this JS-distance score is PolyGraphScore.
-  mode: point                 # point or interval
+  mode: interval              # original benchmark uses StandardPGDInterval; point is available for quick checks
   variant: jsd                # jsd = paper PGS-JS; informedness = PGS-TV ablation
   classifier: tabpfn          # paper-style; use logistic only for smoke tests
 
@@ -50,7 +50,7 @@ polygraphscore_official:
 
   # Interval mode only. Official interval mode requires at least
   # 2 * subsample_size graphs on both reference and generated sides.
-  subsample_size: 2048
+  subsample_size: null        # null = min(n_per_side / 2, 2048), matching original benchmark logic
   num_samples: 10
 
   # Descriptor/classifier options.
@@ -59,3 +59,14 @@ polygraphscore_official:
   gin_device: cpu
   gin_seed: 42
   logistic_max_iter: 5000
+
+  # Generic descriptors ignore benchmark node/edge/graph attributes.
+  strip_attributes_for_generic: true
+
+  # Molecular settings used for QM9/ZINC when pgs_domain=auto.
+  pgs_domain: auto
+  molecular_datasets: [qm9, zinc]
+  molecular_descriptors: [topochemical, morgan_fingerprint, lipinski]
+  molecular_sanitize: true
+  molecular_fingerprint_dim: 128
+  allow_torch_geometric_shim: true

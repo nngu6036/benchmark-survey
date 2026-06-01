@@ -66,6 +66,7 @@ DEFAULT_MOLECULE_DESCRIPTORS = ["topochemical", "morgan_fingerprint", "lipinski"
 DEFAULT_METRIC_FILENAME = "polygraphscore_official.json"
 ORBIT_DIMS = {4: 15, 5: 73}
 DEPENDENCY_SHIMS: dict[str, str] = {}
+DEVICE_DIAGNOSTICS: dict[str, Any] = {}
 
 
 def log(msg: str, *args: Any) -> None:
@@ -92,6 +93,78 @@ def json_default(obj: Any) -> Any:
 
 
 
+
+
+def probe_torch_cuda() -> dict[str, Any]:
+    """Return CUDA availability diagnostics recorded in every output JSON.
+
+    torch.cuda.is_available() may emit the same warning shown in the user's log
+    if the installed PyTorch CUDA runtime is incompatible with the NVIDIA
+    driver.  The diagnostic makes it explicit whether the script could actually
+    use CUDA for TabPFN or GIN.
+    """
+    diag: dict[str, Any] = {}
+    try:
+        import torch
+
+        diag["torch_version"] = getattr(torch, "__version__", None)
+        diag["torch_cuda_build"] = getattr(torch.version, "cuda", None)
+        available = bool(torch.cuda.is_available())
+        diag["cuda_available"] = available
+        if available:
+            diag["cuda_device_count"] = int(torch.cuda.device_count())
+            try:
+                diag["cuda_current_device"] = int(torch.cuda.current_device())
+                diag["cuda_device_name"] = torch.cuda.get_device_name(torch.cuda.current_device())
+            except Exception as exc:
+                diag["cuda_device_name_error"] = repr(exc)
+        else:
+            diag["cuda_device_count"] = 0
+    except Exception as exc:  # noqa: BLE001
+        diag["torch_cuda_probe_error"] = repr(exc)
+    DEVICE_DIAGNOSTICS.update(diag)
+    return diag
+
+
+def resolve_torch_device(requested: Any, *, purpose: str, require_if_explicit: bool = True) -> str:
+    """Resolve a torch device string and fail clearly for impossible CUDA requests."""
+    value = "auto" if requested in (None, "", "null", "None") else str(requested).strip().lower()
+    diag = probe_torch_cuda()
+    cuda_available = bool(diag.get("cuda_available"))
+    if value == "auto":
+        resolved = "cuda" if cuda_available else "cpu"
+    else:
+        resolved = value
+    if resolved.startswith("cuda") and not cuda_available and require_if_explicit and value != "auto":
+        raise RuntimeError(
+            f"{purpose} requested device={value!r}, but torch.cuda.is_available() is false. "
+            "The warning log indicates that the NVIDIA driver is too old for the installed PyTorch CUDA build. "
+            "Update the driver or install a PyTorch wheel/conda package compatible with the server driver."
+        )
+    DEVICE_DIAGNOSTICS[f"{purpose}_device_requested"] = value
+    DEVICE_DIAGNOSTICS[f"{purpose}_device_resolved"] = resolved
+    return resolved
+
+
+def make_tabpfn_classifier_with_device(cfg: Mapping[str, Any]) -> Any:
+    """Construct PolyGraph's default TabPFN v2.5 classifier with explicit device control."""
+    from packaging.version import Version
+    from tabpfn import TabPFNClassifier
+    from tabpfn.classifier import ModelVersion
+
+    tabpfn_ver = Version(importlib_metadata.version("tabpfn"))
+    if tabpfn_ver < Version("2.0.9"):
+        raise RuntimeError("TabPFN >= 2.0.9 is required. Install with `pip install 'tabpfn>=2.0.9'`.")
+
+    requested = cfg.get("classifier_device", cfg.get("tabpfn_device", cfg.get("device", "auto")))
+    device = resolve_torch_device(requested, purpose="classifier")
+    n_estimators = int(cfg.get("tabpfn_n_estimators", cfg.get("n_estimators", 4)) or 4)
+    DEVICE_DIAGNOSTICS["tabpfn_n_estimators"] = n_estimators
+    return TabPFNClassifier.create_default_for_version(
+        ModelVersion.V2_5,
+        device=device,
+        n_estimators=n_estimators,
+    )
 
 def patch_scipy_compat() -> None:
     """Patch SciPy/NetworkX compatibility for older NetworkX spectral code.
@@ -443,10 +516,7 @@ def find_orca(value: str | None, *, survey_root: Path, auto_compile: bool) -> Pa
 
 
 def install_orbit_count_shim(orca_exec: Path | None) -> None:
-    import importlib.machinery as importlib_machinery
-
     mod = types.ModuleType("orbit_count")
-    mod.__spec__ = importlib_machinery.ModuleSpec("orbit_count", loader=None)
 
     def count_one(graph: Any, graphlet_size: int) -> np.ndarray:
         if orca_exec is None:
@@ -941,7 +1011,9 @@ def make_descriptors(poly: Mapping[str, Any], names: Sequence[str], cfg: Mapping
         elif name == "spectral":
             descriptors[name] = poly["EigenvalueHistogram"](n_bins=int(cfg.get("spectral_bins", 200)))
         elif name == "gin":
-            descriptors[name] = poly["RandomGIN"](node_feat_loc=None, input_dim=1, edge_feat_loc=None, edge_feat_dim=0, seed=int(cfg.get("gin_seed", seed)), device=str(cfg.get("gin_device", "cpu")))
+            gin_requested = cfg.get("gin_device", cfg.get("device", "cpu"))
+            gin_device = resolve_torch_device(gin_requested, purpose="gin", require_if_explicit=False)
+            descriptors[name] = poly["RandomGIN"](node_feat_loc=None, input_dim=1, edge_feat_loc=None, edge_feat_dim=0, seed=int(cfg.get("gin_seed", seed)), device=gin_device)
         else:
             raise ValueError(f"Unknown descriptor {name!r}")
     if not descriptors:
@@ -1188,17 +1260,25 @@ def convert_graphs_to_rdkit_mols(
 def make_classifier(name: str, cfg: Mapping[str, Any], seed: int, poly: Mapping[str, Any]) -> tuple[Any | None, str]:
     normalized = name.lower().replace("_", "-")
     if normalized in {"official-default", "default", "tabpfn", "tabpfn-v25"}:
-        return PositiveClassProbabilityAdapter(poly["default_classifier"]()), "polygraph-benchmark default TabPFN + P(y=1) probability adapter"
+        base = make_tabpfn_classifier_with_device(cfg)
+        device = DEVICE_DIAGNOSTICS.get("classifier_device_resolved", "unknown")
+        return PositiveClassProbabilityAdapter(base), f"polygraph-benchmark default TabPFN(device={device}) + P(y=1) probability adapter"
     if normalized in {"logistic", "logistic-regression", "lr"}:
         from sklearn.linear_model import LogisticRegression
 
+        DEVICE_DIAGNOSTICS["classifier_device_requested"] = "not_applicable"
+        DEVICE_DIAGNOSTICS["classifier_device_resolved"] = "cpu_sklearn"
         base = LogisticRegression(max_iter=int(cfg.get("logistic_max_iter", 5000)), random_state=seed)
         return PositiveClassProbabilityAdapter(base), "sklearn LogisticRegression + P(y=1) probability adapter"
     if normalized == "auto":
         if has_real_tabpfn():
-            return PositiveClassProbabilityAdapter(poly["default_classifier"]()), "polygraph-benchmark default TabPFN(auto) + P(y=1) probability adapter"
+            base = make_tabpfn_classifier_with_device(cfg)
+            device = DEVICE_DIAGNOSTICS.get("classifier_device_resolved", "unknown")
+            return PositiveClassProbabilityAdapter(base), f"polygraph-benchmark default TabPFN(auto, device={device}) + P(y=1) probability adapter"
         from sklearn.linear_model import LogisticRegression
 
+        DEVICE_DIAGNOSTICS["classifier_device_requested"] = "not_applicable"
+        DEVICE_DIAGNOSTICS["classifier_device_resolved"] = "cpu_sklearn_auto_fallback"
         base = LogisticRegression(max_iter=int(cfg.get("logistic_max_iter", 5000)), random_state=seed)
         return PositiveClassProbabilityAdapter(base), "sklearn LogisticRegression(auto fallback; TabPFN unavailable) + P(y=1) probability adapter"
     raise ValueError(f"Unknown classifier {name!r}")
@@ -1391,6 +1471,7 @@ def evaluate_one(dataset: str, model: str, run_id: int | None, cfg: Mapping[str,
         },
         "result_diagnostics": result_diagnostics,
         "dependency_shims": dict(DEPENDENCY_SHIMS),
+        "device_diagnostics": dict(DEVICE_DIAGNOSTICS),
         "polygraph_root_resolved": poly.get("polygraph_root_resolved"),
         "versions": package_versions(),
     }
@@ -1482,6 +1563,9 @@ def merge_cfg(args: argparse.Namespace, experiment_cfg: Mapping[str, Any]) -> di
         "max_degree",
         "gin_dim",
         "gin_device",
+        "classifier_device",
+        "tabpfn_device",
+        "tabpfn_n_estimators",
         "logistic_max_iter",
         "orca_exec",
         "cv_folds",
@@ -1505,8 +1589,11 @@ def merge_cfg(args: argparse.Namespace, experiment_cfg: Mapping[str, Any]) -> di
         value = getattr(args, key, None)
         if value is not None:
             cfg[key] = value
-    if getattr(args, "device", None) is not None and cfg.get("gin_device") is None:
-        cfg["gin_device"] = args.device
+    if getattr(args, "device", None) is not None:
+        if cfg.get("gin_device") is None:
+            cfg["gin_device"] = args.device
+        if cfg.get("classifier_device") is None:
+            cfg["classifier_device"] = args.device
     if args.descriptors:
         cfg["descriptors"] = args.descriptors
     if getattr(args, "molecular_descriptors", None):
@@ -1567,10 +1654,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--edge-label-attr", default=None, help="Accepted for compatibility; official PGS ignores benchmark attribute schema.")
     p.add_argument("--edge-feature-attr", default=None, help="Accepted for compatibility; official PGS ignores benchmark attribute schema.")
     p.add_argument("--graph-label-attr", default=None, help="Accepted for compatibility; official PGS ignores benchmark attribute schema.")
-    p.add_argument("--device", default=None, help="Compatibility alias for --gin-device when --gin-device is not set.")
+    p.add_argument("--device", default=None, help="Compatibility alias for both --classifier-device and --gin-device when they are not set.")
     p.add_argument("--subsample-size", type=int, default=None)
     p.add_argument("--num-samples", type=int, default=None)
     p.add_argument("--gin-device", default=None)
+    p.add_argument("--classifier-device", default=None, help="Device for TabPFN classifier: auto, cpu, cuda, cuda:0, etc. Use cuda to require GPU.")
+    p.add_argument("--tabpfn-device", dest="classifier_device", default=None, help="Alias for --classifier-device")
+    p.add_argument("--tabpfn-n-estimators", type=int, default=None, help="Number of TabPFN estimators; PolyGraph default is 4.")
     p.add_argument("--logistic-max-iter", type=int, default=None)
     p.add_argument("--orca-exec", default=None, help="Optional override; normally use ORCA_EXEC instead")
     p.add_argument("--output", default=None, help="Only for exactly one dataset/model/run")
@@ -1650,7 +1740,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 save_json(agg_payload, agg_path)
                 log("saved aggregate -> %s", agg_path)
     if not args.dry_run:
-        save_json({"metric_family": "polygraphscore_official", "datasets": datasets, "models": models, "descriptors": descriptors, "classifier_resolved": classifier_resolved, "dependency_shims": DEPENDENCY_SHIMS, "records": batch_records, "errors": errors}, batch_path(root, metrics_root, filename))
+        save_json({"metric_family": "polygraphscore_official", "datasets": datasets, "models": models, "descriptors": descriptors, "classifier_resolved": classifier_resolved, "dependency_shims": DEPENDENCY_SHIMS, "device_diagnostics": DEVICE_DIAGNOSTICS, "records": batch_records, "errors": errors}, batch_path(root, metrics_root, filename))
     return 0 if not errors or continue_on_error else 1
 
 

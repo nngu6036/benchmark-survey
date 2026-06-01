@@ -349,6 +349,7 @@ for dataset in "${datasets[@]}"; do
       --cv-folds 4 \
       --classifier auto \
       --skip-orbits
+      --force
 
     PYTHONPATH=src python scripts/evaluate_learned_feature_metrics.py \
       --dataset "$dataset" \
@@ -360,6 +361,22 @@ for dataset in "${datasets[@]}"; do
       --max-generated-graphs 1024
   done
 done
+```
+require GPU and fail fast if unavailable
+```bash
+PYTHONPATH=src python scripts/evaluate_polygraphscore_official.py \
+  --dataset sbm \
+  --model digress \
+  --run-ids 0 1 2 \
+  --max-reference-graphs 1000 \
+  --max-generated-graphs 1000 \
+  --num-splits 5 \
+  --cv-folds 4 \
+  --classifier tabpfn \
+  --classifier-device cuda \
+  --gin-device cuda \
+  --skip-orbits \
+  --force
 ```
 
 Metric files are written under `outputs/metrics/<dataset>/<model>/`.

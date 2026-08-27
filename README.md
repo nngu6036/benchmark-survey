@@ -531,7 +531,7 @@ If you use the benchmark or accompanying survey, please cite the corresponding p
 
 A benchmark code release is referenced in the manuscript as:
 
-> Quang Nguyen. *Time-Dependent Graph Generation Survey]{Time-Dependent Graph Generation: A Survey of Discrete-Time and Continuous-Time Perspectives*. 2026.
+> Quang Nguyen,Muhammad Farhan, Asiri Wijesinghe. *Time-Dependent Graph Generation Survey]{Time-Dependent Graph Generation: A Survey of Discrete-Time and Continuous-Time Perspectives*. 2026.
 
 ---
 

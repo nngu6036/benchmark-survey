@@ -15,7 +15,66 @@ dependencies = [
   "PyYAML",
   "scikit-learn",
   "matplotlib",
+  "rich",
+  "tqdm",
+  "psutil",
+  "packaging",
+  "requests",
+  "pillow",
+  "joblib",
+  "cycler",
+  "decorator",
+  "python-dateutil",
+  "six",
+  "rdkit",
+  "torch",
+  "torchvision",
+  "torchaudio",
+  "torch-geometric",
+  "torch-scatter",
+  "torch-sparse",
+  "torch-cluster",
+  "torch-spline-conv",
+  "pytorch-lightning>=1.8,<3",
+  "torchmetrics",
+  "tensorboard",
+  "tensorboardX",
+  "hydra-core==1.3.2",
+  "omegaconf>=2.3",
+  "wandb",
+  "easydict",
+  "imageio",
+  "pyemd",
+  "PyGSP",
+  "overrides",
+  "dill",
+  "msgpack",
+  "termcolor",
+  "guacamol",
+  "moses",
+  "appdirs",
+  "loguru",
+  "pydantic>=2,<3",
+  "numba",
+  "tabpfn>=2.0.9",
+  "fcd~=1.2.2",
+  "mkdocs",
+  "mkdocs-material",
+  "mkdocstrings",
+  "mkdocstrings-python",
+  "mkdocs-terminal",
+  "jinja2",
+  "tabulate",
 ]
+
+[project.optional-dependencies]
+test = [
+  "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,8 +1,0 @@
-numpy
-scipy
-networkx
-pandas
-PyYAML
-scikit-learn
-matplotlib
-rich

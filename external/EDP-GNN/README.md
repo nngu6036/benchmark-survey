@@ -16,7 +16,7 @@ First, install PyTorch following the steps on its [official website](https://pyt
 Then run the following command to install the other dependencies.
 
 ```shell
-pip install -r requirements.txt
+pip install -r ../../requirements.txt
 ```
 
 To compile the ORCA program (see http://www.biolab.si/supp/orca/orca.html) for the evaluation step, run

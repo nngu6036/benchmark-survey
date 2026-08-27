@@ -12,7 +12,7 @@ Please refer to the **Dependencies** in [READEME.md](../README.md) of the root d
 <!-- Create environment with **Python 3.9.15** and **Pytorch 1.12.1**. Please use the following command to install the requirements:
 
 ```
-pip install -r requirements.txt
+pip install -r ../../../requirements.txt
 conda install -c conda-forge graph-tool=2.45
 conda install -c conda-forge rdkit=2023.03.2
 ``` -->

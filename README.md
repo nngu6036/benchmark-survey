@@ -1,490 +1,540 @@
-# Survey Benchmark: attributed graphs, QM9/ZINC, and evaluation
+# Graph Generative Model Benchmark
 
-This repository contains the empirical benchmark scaffold for the graph-generation survey. It supports run-aware checkpoints/samples for repeated synthetic experiments, single-run real/molecular experiments, descriptor/PGS/feature-space evaluation, molecular RDKit validity metrics, and canonical attributed-graph handling for both synthetic graphs and molecular graphs.
+A reproducible benchmark and evaluation framework for **modern graph generative models** across synthetic and molecular graph datasets.
 
-## 1. Installation
+This project accompanies my research on **time-dependent graph generation**, where graph generators are studied through a unified perspective based on probability paths, state spaces, evolution dynamics, training objectives, and sampling mechanisms.
 
-Core synthetic-graph experiments need only the core scientific Python stack. Molecular datasets and most model wrappers require PyTorch and PyTorch Geometric.
+The benchmark is designed to answer a practical research question:
+
+> **When graph generative models are evaluated under the same datasets, sample budgets, and metric families, how consistent are the conclusions across different evaluation protocols?**
+
+It provides a common pipeline for training, sampling, evaluating, comparing, and reporting graph generative models spanning discrete diffusion, continuous-time jump processes, constrained generation, score-based models, and bridge-based approaches.
+
+---
+
+## Portfolio Highlights
+
+This repository demonstrates experience in:
+
+- **Generative AI benchmarking**
+- **Graph neural networks and graph generation**
+- **Discrete diffusion and denoising models**
+- **Continuous-time Markov chains (CTMCs)**
+- **Score-based generative modeling**
+- **Flow / bridge-based graph generation**
+- **Molecular graph generation**
+- **Research software engineering**
+- **Reproducible ML experimentation**
+- **Model-wrapper and integration architecture**
+- **Metric design and statistical evaluation**
+- **Compute-budget and runtime analysis**
+- **Automated LaTeX result generation**
+- **PyTorch, PyTorch Geometric, NetworkX, and RDKit workflows**
+
+---
+
+## Research Context
+
+The accompanying survey, **“Time-Dependent Graph Generation: A Survey of Discrete-Time and Continuous-Time Perspectives,”** organizes graph generation around a common temporal and transport-based view.
+
+The core idea is that many seemingly different graph generators can be interpreted as learning a trajectory
+
+```text
+reference distribution
+        ↓
+time-indexed intermediate states
+        ↓
+target graph distribution
+```
+
+with different choices of:
+
+- time representation,
+- state space,
+- probability path,
+- evolution dynamics,
+- training objective,
+- sampling strategy,
+- graph-specific validity mechanisms.
+
+This benchmark operationalizes the evaluation part of that perspective by running representative models under a common experimental framework.
+
+---
+
+## What the Benchmark Evaluates
+
+Graph generation quality is multi-dimensional. No single metric reliably captures structural fidelity, diversity, validity, and distributional similarity.
+
+The benchmark therefore combines four complementary metric families.
+
+### 1. Descriptor-Based Distributional Metrics
+
+Generated and reference graphs are compared through interpretable graph statistics such as:
+
+- degree distributions,
+- clustering coefficients,
+- orbit counts,
+- Laplacian spectral statistics.
+
+Distribution differences are measured using **Maximum Mean Discrepancy (MMD)**.
+
+### 2. Learned-Feature Metrics
+
+Graphs are embedded into a feature space and compared using feature-space distribution distances.
+
+This captures structural information that may be missed by manually chosen descriptors.
+
+### 3. Classifier-Based Two-Sample Metrics
+
+The benchmark supports **PolyGraphScore / PGS-JS**, which asks how easily a probabilistic classifier can distinguish generated graphs from reference graphs.
+
+Lower PGS-JS indicates that the two graph sets are harder to distinguish under the chosen test.
+
+### 4. Intrinsic Molecular Metrics
+
+For molecular datasets, the benchmark additionally reports:
+
+- validity,
+- uniqueness,
+- novelty,
+- atom-type MMD,
+- bond-type MMD,
+- valid-unique-novel rate.
+
+The purpose is not to collapse model quality into one scalar score, but to examine **agreement and disagreement across complementary evaluation signals**.
+
+---
+
+## Supported Datasets
+
+The benchmark currently covers two structural and two molecular graph datasets.
+
+| Dataset | Type | Main Purpose |
+|---|---|---|
+| **SBM** | Synthetic topology | Community-structured graph generation |
+| **Planar** | Synthetic topology | Constraint-sensitive graph generation |
+| **QM9** | Molecular graph | Small attributed molecular generation |
+| **ZINC** | Molecular graph | Drug-like molecular generation |
+
+The paper-facing benchmark uses fixed preparation rules and common sample budgets to improve comparability across models.
+
+---
+
+## Model Families
+
+The benchmark integrates representative models from several major graph-generation paradigms.
+
+| Model | Generative Family | State / Dynamics |
+|---|---|---|
+| **GraphGUIDE** | Discrete diffusion | Bernoulli edge-space denoising |
+| **DiGress** | Discrete diffusion | Categorical node-edge denoising |
+| **ConStruct** | Constraint-aware diffusion | Edge-absorbing diffusion + projection |
+| **EDP-GNN** | Score-based generation | Continuous adjacency + Langevin sampling |
+| **DisCo** | Continuous-time diffusion | Discrete-state CTMC |
+| **GruM** | Bridge-based generation | OU bridge-mixture dynamics |
+
+Additional wrappers and integration scaffolding are included for other methods used during development.
+
+---
+
+## Unified Benchmark Pipeline
+
+```mermaid
+flowchart LR
+    A["Dataset Preparation"] --> B["Common Graph Schema"]
+    B --> C["Model Wrapper"]
+    C --> D["Training"]
+    D --> E["Sampling"]
+    E --> F["Generated Graphs"]
+
+    F --> G["Descriptor MMD"]
+    F --> H["Learned-Feature Metrics"]
+    F --> I["PGS-JS"]
+    F --> J["Molecular Metrics"]
+
+    G --> K["Aggregate Results"]
+    H --> K
+    I --> K
+    J --> K
+
+    K --> L["Tables + Compute Report"]
+```
+
+Each model is accessed through a benchmark-facing wrapper so that heterogeneous upstream codebases can be evaluated through a common interface.
+
+---
+
+## Engineering Design
+
+### Model Wrappers
+
+The repository isolates model-specific training and sampling logic from the benchmark itself.
+
+Wrappers normalize:
+
+- configuration,
+- dataset conversion,
+- training,
+- checkpoint handling,
+- generation,
+- graph serialization,
+- runtime diagnostics.
+
+This avoids rewriting the evaluation pipeline for every research codebase.
+
+### Canonical Graph Representation
+
+Attributed graphs use a common NetworkX schema:
+
+```text
+node["node_label"]                 categorical node / atom label
+node["feats"]                      numeric node feature vector
+edge["edge_type"]                  categorical edge / bond label
+edge["edge_attr"]                  numeric edge feature vector
+graph.graph["molecular_target"]    optional molecular target
+```
+
+This allows evaluation code to operate independently of each model's internal tensor representation.
+
+### Repeated Experiments
+
+The benchmark supports run-aware training and sampling, including:
+
+- independent random seeds,
+- run-specific checkpoints,
+- run-specific generated samples,
+- aggregated mean / standard deviation,
+- automated status tracking.
+
+### Compute Accounting
+
+The framework records and reports:
+
+- training epochs,
+- sampling budgets,
+- training time,
+- sampling time,
+- peak GPU memory,
+- hardware/software environment.
+
+This matters because two models with similar graph-quality metrics may have very different generation costs.
+
+---
+
+## Experimental Protocol
+
+The paper-facing benchmark uses:
+
+- **three independent runs per model-dataset pair**,
+- **1,024 generated graphs per run**,
+- common reference sample sizes,
+- fixed preprocessing,
+- common metric implementations wherever possible.
+
+Synthetic experiments compare structural graph distributions using degree, clustering, orbit, spectral, feature-space, and classifier-based metrics.
+
+Molecular experiments additionally evaluate categorical atom/bond distributions and chemical quality.
+
+---
+
+## Selected Benchmark Findings
+
+The benchmark is intended as a **consistency analysis**, not a definitive leaderboard.
+
+### Synthetic Graphs
+
+Under the reported protocol:
+
+- **ConStruct** is especially consistent across descriptor-based and classifier-based metrics on Planar and SBM.
+- **DiGress** is highly competitive on degree and learned-feature signals.
+- Different metric families often produce different model rankings.
+
+This is an important observation: disagreement between metrics can reveal *which structural aspects* of a generated distribution are matched and which remain distinguishable.
+
+For example, on the reported SBM benchmark:
+
+| Model | Degree MMD ↓ | Clustering MMD ↓ | Orbit MMD ↓ | Spectral MMD ↓ | PGS-JS ↓ |
+|---|---:|---:|---:|---:|---:|
+| ConStruct | 0.0002 | 0.0070 | 0.0007 | 0.0009 | 0.0472 |
+| DiGress | 0.0001 | 0.0119 | 0.0014 | 0.0015 | 0.1659 |
+| DisCo | 0.0003 | 0.0198 | 0.0024 | 0.0017 | 0.1022 |
+| GruM | 0.0032 | 0.0302 | 0.0059 | 0.0150 | 0.2952 |
+
+Values above are means across the reported repeated runs; see the research paper for the complete tables and uncertainty values.
+
+### Molecular Graphs
+
+The molecular experiments show that:
+
+- high molecular validity does not necessarily imply accurate atom/bond distribution matching,
+- uniqueness and novelty can saturate and therefore become less discriminative,
+- feature-based and classifier-based metrics provide additional evidence beyond validity alone.
+
+On the reported QM9 benchmark, GruM reaches full validity in the experiment, while ConStruct, DiGress, and DisCo show different trade-offs across bond-type, feature-space, and classifier-based metrics.
+
+---
+
+## Compute-Aware Comparison
+
+One feature of this benchmark is that model quality is considered together with inference cost.
+
+For example, in the reported experiments on SBM:
+
+| Model | Training Time | Sampling Time / 128 Graphs |
+|---|---:|---:|
+| ConStruct | 1.99 h | 7.20 min |
+| DiGress | 1.84 h | 3.28 min |
+| DisCo | 3.90 h | 20.79 s |
+| EDP-GNN | 1.20 h | 5.71 min |
+| GraphGUIDE | 1.10 h | 3.79 min |
+| GruM | 2.52 h | 6.52 min |
+
+This makes the project useful not only for model-quality comparison, but also for studying the **quality–sampling-cost trade-off** across generative paradigms.
+
+---
+
+## Repository Layout
+
+```text
+configs/                         dataset, model, metric, experiment configs
+scripts/                         CLI entry points
+src/empirical_comparison/        benchmark package
+external/                        upstream model / metric repositories
+outputs/                         datasets, checkpoints, samples, metrics
+tests/                           benchmark tests
+```
+
+Typical artifacts:
+
+```text
+outputs/datasets/<dataset>/
+outputs/checkpoints/<dataset>/<model>/
+outputs/runs/<dataset>/<model>/
+outputs/samples/<dataset>/<model>/
+outputs/metrics/<dataset>/<model>/
+outputs/tables/
+```
+
+---
+
+## Quick Start
+
+### Install
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+
 pip install -r requirements.txt
 export PYTHONPATH=src
 ```
 
-External model wrappers still require their upstream repositories when applicable. Set the matching environment variable, for example `DIGRESS_REPO`, `CONSTRUCT_REPO`, `DISCO_REPO`, `GRAPHGUIDE_REPO`, `EDP_GNN_REPO`, or `GRUM_REPO`, or fill `repo_root` in the corresponding `configs/models/*.yaml` file.
+PyTorch and PyTorch Geometric wheels may need to be selected for the local CUDA environment.
 
-## 2. Prepare datasets
+---
 
-Synthetic featureless datasets:
-
-```bash
-PYTHONPATH=src python scripts/prepare_data.py --dataset sbm --force
-PYTHONPATH=src python scripts/prepare_data.py --dataset planar --force
-```
-
-Molecular attributed datasets:
+### Prepare a Dataset
 
 ```bash
-# QM9: default config converts a 12k shuffled subset. Use --max-graphs or edit
-# configs/datasets/qm9.yaml to set max_graphs: null for the full dataset.
-PYTHONPATH=src python scripts/prepare_data.py \
-  --dataset qm9 \
-  --download-root outputs/raw_datasets/qm9 \
-  --force
-
-# QM9 uses PyG's official preprocessed archive by default. This bypasses
-# RDKit raw-SDF parsing, which can fail in some RDKit/PyG environments when
-# a raw molecule is parsed as None. Set prefer_preprocessed: false only if you
-# specifically need PyG to rebuild QM9 from the raw SDF file.
-
-# ZINC: default config uses PyG's 12k subset and official train/val/test splits.
-# Set subset: false in configs/datasets/zinc.yaml for the full ZINC dataset.
-PYTHONPATH=src python scripts/prepare_data.py \
-  --dataset zinc \
-  --download-root outputs/raw_datasets/zinc \
-  --force
+PYTHONPATH=src python scripts/prepare_data.py   --dataset sbm   --force
 ```
 
-To inspect ZINC atom-type/category values without overwriting existing prepared
-splits, use:
+For molecular data:
 
 ```bash
-PYTHONPATH=src python scripts/prepare_zinc_from_smiles.py \
-  --csv data/zinc250k.csv \
-  --smiles-col smiles \
-  --train-count 10000 \
-  --val-count 1000 \
-  --test-count 1000 \
-  --seed 42 \
-  --force
+PYTHONPATH=src python scripts/prepare_data.py   --dataset qm9   --download-root outputs/raw_datasets/qm9   --force
 ```
 
-This prints raw/canonical `atom_type` or `node_label` counts when available and
-then exits. It does not rewrite `outputs/datasets/zinc/*.pkl`, so it does not
-require retraining models.
+---
 
-The real-dataset builders convert PyG `Data` objects into NetworkX graphs with this benchmark schema:
-
-```yaml
-node["node_label"]      # categorical atom/node label
-node["feats"]           # numeric node feature vector
-edge["edge_type"]       # categorical bond/edge label; 0 is reserved for dense no-edge states
-edge["edge_attr"]       # numeric edge feature vector, when available
-graph.graph["molecular_target"]  # optional regression target vector, not used as graph_label
-```
-
-Persisted outputs are written under `outputs/datasets/<dataset>/` by default:
-
-```text
-train.pkl
-val.pkl
-test.pkl
-metadata.json
-resolved_dataset_config.yaml
-```
-
-## 3. Train models on featureless or attributed graphs
-
-Single model and dataset:
+### Train a Model
 
 ```bash
-PYTHONPATH=src python scripts/train_model.py --dataset sbm --model dummy
-PYTHONPATH=src python scripts/generate_samples.py --dataset sbm --model dummy --num-samples 1024 --force
+PYTHONPATH=src python scripts/train_model.py   --dataset planar   --model digress   --seed 42   --run-id 0   --use-run-paths
 ```
 
-Run-aware synthetic repetition example:
+---
+
+### Generate Samples
 
 ```bash
-PYTHONPATH=src python scripts/train_model.py \
-  --dataset planar \
-  --model digress \
-  --seed 42 \
-  --run-id 0 \
-  --use-run-paths
-
-PYTHONPATH=src python scripts/generate_samples.py \
-  --dataset planar \
-  --model digress \
-  --num-samples 1024 \
-  --seed 42 \
-  --run-id 0 \
-  --use-run-paths \
-  --force
+PYTHONPATH=src python scripts/generate_samples.py   --dataset planar   --model digress   --num-samples 1024   --seed 42   --run-id 0   --use-run-paths   --force
 ```
 
+---
+
+### Evaluate Structural Metrics
+
 ```bash
-for run_id in {0..2}; do
-  seed=$((42 + run_id))
-
-    PYTHONPATH=src python scripts/train_model.py \
-    --dataset sbm \
-    --model construct \
-    --seed "$seed" \
-    --run-id "$run_id" \
-    --use-run-paths
-
-  PYTHONPATH=src python scripts/generate_samples.py \
-    --dataset sbm \
-    --model construct \
-    --num-samples 1024 \
-    --seed "$seed" \
-    --run-id "$run_id" \
-    --use-run-paths \
-    --force
-
-  PYTHONPATH=src python scripts/train_model.py \
-    --dataset planar \
-    --model construct \
-    --seed "$seed" \
-    --run-id "$run_id" \
-    --use-run-paths
-
-  PYTHONPATH=src python scripts/generate_samples.py \
-    --dataset planar \
-    --model construct \
-    --num-samples 1024 \
-    --seed "$seed" \
-    --run-id "$run_id" \
-    --use-run-paths \
-    --force
-done
+PYTHONPATH=src python scripts/evaluate_descriptor_metrics.py   --dataset sbm   --model digress   --reference-split test   --max-reference-graphs 1024   --max-generated-graphs 1024
 ```
 
+---
 
-Run-aware outputs are stored as `outputs/checkpoints/<dataset>/<model>/run_000/...`, `outputs/samples/<dataset>/<model>/run_000.pkl`, and `outputs/metrics/<dataset>/<model>/run_000/*.json`.
-
-Attributed molecular example:
+### Evaluate PolyGraphScore / PGS-JS
 
 ```bash
-PYTHONPATH=src python scripts/train_model.py \
-  --dataset qm9 \
-  --model dummy \
-  --seed 42 \
-  --run-id 0 \
-  --use-run-paths
-
-PYTHONPATH=src python scripts/generate_samples.py \
-  --dataset qm9 \
-  --model dummy \
-  --num-samples 1024 \
-  --seed 42 \
-  --run-id 0 \
-  --use-run-paths \
-  --force
+PYTHONPATH=src python scripts/evaluate_polygraphscore_official.py   --dataset qm9   --model disco   --run-ids 0 1 2   --max-reference-graphs 1024   --max-generated-graphs 1024   --num-splits 5   --classifier auto
 ```
 
+---
+
+### Evaluate Learned Features
+
 ```bash
-for run_id in {0..2}; do
-  seed=$((42 + run_id))
-
-  PYTHONPATH=src python scripts/train_model.py \
-    --dataset zinc \
-    --model edp_gnn \
-    --seed "$seed" \
-    --run-id "$run_id" \
-    --use-run-paths
-
-  PYTHONPATH=src python scripts/generate_samples.py \
-    --dataset zinc \
-    --model edp_gnn \
-    --num-samples 1024 \
-    --seed "$seed" \
-    --run-id "$run_id" \
-    --use-run-paths \
-    --force
-
-  PYTHONPATH=src python scripts/train_model.py \
-    --dataset qm9 \
-    --model edp_gnn \
-    --seed "$seed" \
-    --run-id "$run_id" \
-    --use-run-paths
-
-  PYTHONPATH=src python scripts/generate_samples.py \
-    --dataset qm9 \
-    --model edp_gnn \
-    --num-samples 1024 \
-    --seed "$seed" \
-    --run-id "$run_id" \
-    --use-run-paths \
-    --force
-done
+PYTHONPATH=src python scripts/evaluate_learned_feature_metrics.py   --dataset qm9   --model disco   --run-ids 0 1 2   --reference-split train   --encoder wl_subtree   --max-reference-graphs 1024   --max-generated-graphs 1024
 ```
 
-`generate_samples.py` now displays a graph-level progress bar by default. Add `--no-progress` to disable it in non-interactive runs. `--draw-trajectory` saves a reference-to-sample visualization under `outputs/figures/trajectories/<dataset>/<model>_trajectory.png`.
+---
 
-To visually inspect generated samples:
-
-```bash
-PYTHONPATH=src python scripts/draw_generated_graphs.py \
-  --dataset qm9 \
-  --model disco \
-  --num-graphs 16 \
-  --show-node-labels
-```
-
-A complete benchmark run is configured in `configs/experiment.yaml` and executed with:
+### Aggregate Results
 
 ```bash
-PYTHONPATH=src python scripts/run_benchmark.py
-```
+PYTHONPATH=src python scripts/aggregate_results.py   --run-ids 0 1 2
 
-The default protocol uses `num_runs: 3` for synthetic datasets and `real_dataset_num_runs: 1` for `qm9` and `zinc`. Synthetic run seeds are `seed + 1000 * run_id`; real/molecular datasets keep the single-run legacy layout. The same file also makes `num_reference_graphs: 1024` real by passing `--max-reference-graphs 1024` to all metric scripts.
-
-For expensive upstream wrappers, start with `dummy`, `construct`, or `disco` on small `--max-graphs` molecular subsets before running full experiments.
-
-## 4. Native attributed-graph support by wrapper
-
-- `dummy`: fits graph size/density plus empirical node-label, edge-label, node-feature, edge-feature, and graph-label marginals.
-- `ConStructWrapper`: trains and samples categorical node labels and categorical edge types in the dense discrete state.
-- `DisCoWrapper`: trains and samples categorical node labels and categorical edge types in the dense discrete state.
-- `GraphGUIDEWrapper`: conditions on numeric node features.
-- `EDPGNNWrapper`: accepts numeric node features; generated output uses benchmark fallback attributes unless the upstream model is extended.
-- `DiGressWrapper`: remains primarily structural in this integration; generated attributes may be attached by empirical fallback postprocessing and are marked in sample metadata.
-- `GruMWrapper`: targets GruM's generic 2D adjacency generator. For QM9, sampled adjacencies are postprocessed with a simple valence-constrained atom/bond labeller (`qm9_constrained_postprocess: true`) so molecular validity is meaningful; for other attributed molecular settings, generated attributes may still use fallback postprocessing.
-
-For attributed datasets such as QM9 and ZINC, the benchmark still runs all wrappers, but the metadata should be checked to distinguish native attribute generation from fallback empirical attribute attachment.
-
-## 5. Evaluate all metric families
-
-All evaluation scripts accept the same dataset/model selection pattern. The commands below work for synthetic graphs (`sbm`, `planar`) and attributed molecular graphs (`qm9`, `zinc`) after samples have been generated.
-
-Generic descriptor MMD metrics for non-molecular datasets:
-
-```bash
-PYTHONPATH=src python scripts/evaluate_descriptor_metrics.py \
-  --dataset sbm \
-  --model dummy \
-  --reference-split test \
-  --max-reference-graphs 1024 \
-  --max-generated-graphs 1024 \
-  --skip-orbit
-```
-
-Molecular descriptor metrics for QM9/ZINC:
-
-```bash
-PYTHONPATH=src python scripts/evaluate_molecular_descriptor_metrics.py \
-  --dataset qm9 \
-  --model disco \
-  --run-id 0 \
-  --reference-split test \
-  --max-reference-graphs 1024 \
-  --max-generated-graphs 1024 \
-  --skip-orbit
-```
-
-Pass `--run-id N` to evaluate one run-specific sample such as `outputs/samples/<dataset>/<model>/run_000.pkl`; metric files are written under `outputs/metrics/<dataset>/<model>/run_000/`. Pass `--run-ids 0 1 2` to evaluate several run-specific sample files and write an aggregate JSON such as `outputs/metrics/<dataset>/<model>/descriptor_metrics.aggregate.json`; bare metric keys contain the across-run mean and `<metric>_std` keys contain the across-run population standard deviation.
-
-The generic descriptor script reports degree MMD, clustering MMD, spectral MMD, structural-summary MMD, optional orbit MMD, and `attribute_mmd` when attributes are present. The molecular descriptor script reports those generic descriptors plus `atom_type_mmd`, `bond_type_mmd`, RDKit sanitization validity, uniqueness, novelty, and `valid_unique_novel_rate`. Uniqueness and novelty are computed on canonical RDKit SMILES of valid generated molecules; novelty compares against the training split.
-
-Official PolyGraphScore / PGS-JS metric:
-
-```bash
-PYTHONPATH=src python scripts/evaluate_polygraphscore_official.py \
-  --dataset qm9 \
-  --model disco \
-  --run-ids 0 1 2 \
-  --max-reference-graphs 1024 \
-  --max-generated-graphs 1024 \
-  --num-splits 5 \
-  --cv-folds 4 \
-  --classifier auto \
-  --skip-orbits
-```
-
-`evaluate_polygraphscore_official.py` calls the official `polygraph-benchmark` implementation and writes `polygraphscore_official.json`. It accepts the same common inputs as `evaluate_classifier_metrics.py`, including `--dataset`, `--model`, `--run-id`, `--run-ids`, `--max-reference-graphs`, `--max-generated-graphs`, `--num-splits`, `--classifier`, `--skip-orbit(s)`, descriptor bin flags, and attribute-schema flags. Some compatibility flags are accepted but ignored by the official package when that package controls the corresponding behavior internally. `--classifier auto` uses TabPFN when installed and otherwise falls back to logistic regression.
-
-`evaluate_classifier_metrics.py` remains available as the benchmark-local PGS-style fallback/ablation and writes `classifier_metrics.json`. When both official and fallback PGS files exist, `aggregate_results.py` uses the official value for overlapping table columns such as `pgs_js_distance`.
-
-Feature-space MMD:
-
-```bash
-PYTHONPATH=src python scripts/evaluate_learned_feature_metrics.py \
-  --dataset qm9 \
-  --model disco \
-  --reference-split train \
-  --encoder wl_subtree \
-  --max-reference-graphs 1024 \
-  --max-generated-graphs 1024
-```
-
-The default encoder is now a fitted Weisfeiler-Lehman subtree feature encoder (`wl_subtree`) trained only on the reference split, with optional SVD projection and attribute-aware feature components. `structural` and `random_gin` remain available as ablations/backward-compatible fallbacks, but neither should be described as a trained neural learned-feature metric.
-
-Loop over all datasets and all models:
-
-```bash
-datasets=(sbm planar qm9 zinc)
-models=(construct digress disco edp_gnn graphguide grum)
-
-for dataset in "${datasets[@]}"; do
-  for model in "${models[@]}"; do
-    if [[ "$dataset" == "qm9" || "$dataset" == "zinc" ]]; then
-      PYTHONPATH=src python scripts/evaluate_molecular_descriptor_metrics.py \
-        --dataset "$dataset" \
-        --model "$model" \
-        --run-ids 0 1 2 \
-        --max-reference-graphs 1024 \
-        --max-generated-graphs 1024 \
-        --skip-orbit
-    else
-      PYTHONPATH=src python scripts/evaluate_descriptor_metrics.py \
-        --dataset "$dataset" \
-        --model "$model" \
-        --run-ids 0 1 2\
-        --max-reference-graphs 1024 \
-        --max-generated-graphs 1024 \
-        --skip-orbit
-    fi
-
-    PYTHONPATH=src python scripts/evaluate_polygraphscore_official.py \
-      --dataset "$dataset" \
-      --model "$model" \
-      --run-ids 0 1 2\
-      --max-reference-graphs 1024 \
-      --max-generated-graphs 1024 \
-      --num-splits 5 \
-      --cv-folds 4 \
-      --classifier auto \
-      --skip-orbits
-      --force
-
-    PYTHONPATH=src python scripts/evaluate_learned_feature_metrics.py \
-      --dataset "$dataset" \
-      --model "$model" \
-      --run-ids 0 1 2\
-      --reference-split train \
-      --encoder wl_subtree \
-      --max-reference-graphs 1024 \
-      --max-generated-graphs 1024
-  done
-done
-```
-require GPU and fail fast if unavailable
-```bash
-PYTHONPATH=src python scripts/evaluate_polygraphscore_official.py \
-  --dataset sbm \
-  --model digress \
-  --run-ids 0 1 2 \
-  --max-reference-graphs 1000 \
-  --max-generated-graphs 1000 \
-  --num-splits 5 \
-  --cv-folds 4 \
-  --classifier tabpfn \
-  --classifier-device cuda \
-  --gin-device cuda \
-  --skip-orbits \
-  --force
-```
-
-Metric files are written under `outputs/metrics/<dataset>/<model>/`.
-
-Training and sampling metadata include hardware, runtime, normalized sampling time per 128 graphs, and peak memory fields for compute-budget reporting. After training and sampling the target rows, generate the LaTeX table with:
-
-```bash
-PYTHONPATH=src python scripts/make_compute_budget_table.py \
-  --datasets planar sbm \
-  --models graphguide digress construct edp_gnn disco grum \
-  --run-ids 0 1 2
-```
-
-For a single compute-budget row, use `--dataset` and `--model`. `make_compute_budget_table.py` reads training metadata from `outputs/runs/<dataset>/<model>/.../train_metadata.json` and sampling metadata from `outputs/samples/<dataset>/<model>/...metadata.json`; it does not read `outputs/metrics`. Add `--debug-sources` to log the exact metadata JSON files used.
-
-To inspect which run ids exist and whether training/sampling completed, run:
-
-```bash
-PYTHONPATH=src python scripts/report_run_status.py
-PYTHONPATH=src python scripts/report_run_status.py --dataset qm9 --model grum
-```
-
-With no dataset or model arguments, `report_run_status.py` checks all benchmark datasets and models. Use `--datasets` or `--models` for multi-value subsets, and `--run-ids 0 1 2` to check specific repeated runs.
-
-After metric evaluation, aggregate the JSON metric outputs and generate the benchmark LaTeX tables with:
-
-```bash
-PYTHONPATH=src python scripts/aggregate_results.py
 PYTHONPATH=src python scripts/make_latex_tables.py
 ```
 
-By default, `aggregate_results.py` uses existing `*.aggregate.json` metric files when present; otherwise it averages all discovered per-run metric JSONs for each dataset/model/metric family. To recompute tables from an explicit subset of datasets, models, or runs, pass filters:
+---
+
+## Why This Project Is Interesting
+
+Comparing generative models from different papers is harder than simply copying numbers from their tables.
+
+Reported performance can change because of:
+
+- dataset preprocessing,
+- train/validation/test splits,
+- number of generated samples,
+- metric implementations,
+- random seeds,
+- model checkpoints,
+- solver settings,
+- diffusion or sampling steps,
+- validity filtering,
+- post-processing.
+
+This repository addresses that engineering problem by placing heterogeneous graph generators inside a **common experimental contract**.
+
+The project therefore combines two kinds of work:
+
+### Research
+
+- understanding modern graph-generative paradigms,
+- designing fair cross-family comparisons,
+- studying evaluation reliability,
+- interpreting disagreements between metrics.
+
+### Engineering
+
+- integrating independent research repositories,
+- converting incompatible data representations,
+- handling model-specific environments,
+- managing checkpoints and repeated runs,
+- building reusable metric pipelines,
+- generating reproducible reports automatically.
+
+---
+
+## Research Questions
+
+This benchmark supports investigation of questions such as:
+
+1. **Do descriptor-based, learned-feature, and classifier-based metrics agree on which graph generator is better?**
+2. **How does model ranking change between synthetic and molecular domains?**
+3. **What is the relationship between graph validity and distributional fidelity?**
+4. **How much generation quality is gained for additional sampling cost?**
+5. **Do discrete graph-space models behave differently from relaxed-state models under common evaluation?**
+6. **How should graph-generation benchmarks report uncertainty and repeated-run variation?**
+7. **How can research implementations with incompatible APIs be evaluated fairly under a shared protocol?**
+
+---
+
+## Research Paper
+
+This benchmark accompanies:
+
+> **Time-Dependent Graph Generation: A Survey of Discrete-Time and Continuous-Time Perspectives**  
+> Quang Nguyen, Muhammad Farhan, and Asiri Wijesinghe, 2026.
+
+The paper develops a unified taxonomy of time-dependent graph generation and discusses:
+
+- discrete-time denoising and diffusion,
+- iterative graph refinement,
+- continuous normalizing flows,
+- flow matching,
+- continuous-time Markov chains,
+- stochastic and belief-space generation,
+- bridge-based graph generation,
+- graph validity and constraints,
+- evaluation methodology,
+- applications and open challenges.
+
+The benchmark implements the empirical comparison and reproducibility framework used in the survey.
+
+---
+
+## Reproducibility
+
+The project is designed so that results can be reconstructed from:
+
+- dataset configuration,
+- model configuration,
+- random seed,
+- run identifier,
+- generated sample artifact,
+- metric configuration.
+
+Run-specific artifacts are kept separate, and result aggregation is performed only after the individual experiment outputs have been recorded.
+
+---
+
+## Tests
 
 ```bash
-PYTHONPATH=src python scripts/aggregate_results.py \
-  --datasets planar sbm \
-  --models digress construct disco grum \
-  --run-ids 0 1 2
-PYTHONPATH=src python scripts/make_latex_tables.py \
-  --datasets planar sbm \
-  --models digress construct disco grum
+PYTHONPATH=src python -m pytest -q
 ```
 
-For a single LaTeX table row subset, use `--dataset` and `--model` with `make_latex_tables.py`.
+---
 
-If both `polygraphscore_official.json` and `classifier_metrics.json` are present for a dataset/model, `aggregate_results.py` uses the official PolyGraphScore value for overlapping PGS columns such as `pgs_js_distance`.
+## About This Project
 
-`make_latex_tables.py` writes a full table to `outputs/tables/aggregated_results.tex` and a simplified value-only table to `outputs/tables/aggregated_results_simple.tex`.
+This project is part of my PhD research in **Generative AI**, with a focus on **deep generative models for graphs**.
 
-To generate only the molecular reporting table, run:
-
-```bash
-PYTHONPATH=src python scripts/aggregate_results.py --run-ids 0 1 2
-PYTHONPATH=src python scripts/make_molecular_benchmark_table.py \
-  --datasets qm9 zinc \
-  --models digress construct disco grum
-```
-
-The full molecular table is written to `outputs/tables/molecular_benchmark_results.tex`, and the simplified value-only version is written to `outputs/tables/molecular_benchmark_results_simple.tex`. Missing metric values are rendered as `--`, and GraphGUIDE/EDP-GNN are intentionally omitted from the default molecular table because the current benchmark implementations do not support attributed molecular graphs.
-
-Model hyperparameters used by the benchmark wrappers are summarized below. Values come from `configs/models/*.yaml`; public upstream defaults are used only where the wrapper keeps the upstream model shape.
-
-
-## 6. Paper-style PGS-JS protocol
-
-`scripts/evaluate_polygraphscore_official.py` is the preferred PGS path. It delegates descriptor selection, fit/test splitting, cross-validation, and scoring to the official `polygraph-benchmark` implementation, then saves `polygraphscore_official.json` under `outputs/metrics/<dataset>/<model>/`.
-
-`scripts/evaluate_classifier_metrics.py` implements a benchmark-local balanced, held-out PGS-JS classifier protocol that is useful as a fallback or ablation:
-
-1. Load the reference split and generated samples; apply `--max-reference-graphs` and `--max-generated-graphs`.
-2. Balance the two classes by using `min(num_reference_graphs, num_generated_graphs)` graphs per class. This count is recorded as `balanced_graphs_per_class_used`.
-3. For each repeated partition, randomly split reference and generated graphs into fit and held-out test halves.
-4. For each descriptor, fit the descriptor on the fit half, run stratified cross-validation on the fit half, and score the held-out validation folds with the PGS-JS lower-bound objective.
-5. Select the descriptor with the highest cross-validation score, fit the final classifier on the full fit half, and evaluate on the held-out test half.
-6. Average `pgs_js_distance` across repeated partitions and report the split standard deviation.
-
-For held-out examples with true domain label probability `p_true`, the local fallback computes `JSD_lb = clip(mean(log2(p_true)) + 1, 0, 1)` and reports `pgs_js_distance = sqrt(JSD_lb)`. Lower is better because a classifier that cannot distinguish generated from reference graphs gives a score near 0, while an easily separable generated distribution gives a higher score. The payload also records `pgs_js_divergence_lower_bound`, `pgs_mean_true_class_probability`, `pgs_binary_accuracy_at_0_5`, the selected descriptor, descriptor-wise CV/test scores, and the resolved classifier backend.
-
-## 7. Useful output locations
+It demonstrates my ability to work across the full ML research workflow:
 
 ```text
-outputs/checkpoints/<dataset>/<model>/...   # trained checkpoint for each model/dataset
-outputs/samples/<dataset>/...               # legacy single-run generated graph pickles and sample metadata
-outputs/samples/<dataset>/<model>/run_000.pkl # run-aware synthetic samples
-outputs/runs/<dataset>/<model>/...          # resolved train configs and training metadata
-outputs/metrics/<dataset>/<model>/...       # legacy single-run metric payloads
-outputs/metrics/<dataset>/<model>/run_000/  # run-aware synthetic metric payloads
+literature review
+    ↓
+model analysis
+    ↓
+research-code integration
+    ↓
+experiment design
+    ↓
+GPU training
+    ↓
+generative sampling
+    ↓
+statistical evaluation
+    ↓
+reproducible reporting
 ```
 
-## DiGress wrapper notes
+I am particularly interested in **Generative AI, ML Research Engineering, Graph Machine Learning, model evaluation, and research-to-code projects**.
 
-The revised DiGress wrapper can use the included upstream code at `external/DiGress`. You can still override this with `DIGRESS_REPO=/path/to/DiGress` or `repo_root` in `configs/models/digress.yaml`.
+---
 
-Typical commands on a two-GPU server are:
+## Citation
 
-```bash
-CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src python scripts/train_model.py --model digress --dataset sbm --run-id 0 --use-run-paths
-CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src python scripts/generate_samples.py --model digress --dataset sbm --run-id 0 --use-run-paths --num-samples 1024 --force
+If you use the benchmark or accompanying survey, please cite the corresponding paper / benchmark release once the final publication metadata is available.
 
-CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python scripts/train_model.py --model digress --dataset planar --run-id 0 --use-run-paths
-CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python scripts/generate_samples.py --model digress --dataset planar --run-id 0 --use-run-paths --num-samples 1024 --force
-```
+A benchmark code release is referenced in the manuscript as:
 
-The current default DiGress config uses `num_epochs: 100`, `batch_size: 32`, `sample_batch_size: 32`, and `diffusion_steps: 500`. Synthetic SBM and planar configs use `num_graphs: 10240` and `num_nodes: 64`, which gives approximately 8192/1024/1024 train/validation/test graphs under the 80/10/10 split.
+> Quang Nguyen. *Time-Dependent Graph Generation Survey]{Time-Dependent Graph Generation: A Survey of Discrete-Time and Continuous-Time Perspectives*. 2026.
 
-To print rough operation-count and runtime estimates:
+---
 
-```bash
-PYTHONPATH=src python scripts/estimate_digress_runtime.py --dataset sbm
-PYTHONPATH=src python scripts/estimate_digress_runtime.py --dataset planar
-```
+## License
+
+Add the appropriate repository license before public release.

@@ -699,7 +699,7 @@ class GruMWrapper:
             base_max_nodes = max_nodes_in_data
         explicit_max_nodes = self.config.get("max_node_num")
         if explicit_max_nodes is None:
-            cfg["data"]["max_node_num"] = max(base_max_nodes, max_nodes_in_data)
+            cfg["data"]["max_node_num"] = max_nodes_in_data
         else:
             cfg["data"]["max_node_num"] = int(explicit_max_nodes)
         if cfg["data"]["max_node_num"] < max_nodes_in_data:
@@ -1465,14 +1465,16 @@ class GruMWrapper:
         return graphs
 
     def _sampling_molecular_vocab(self, config: Optional[_EasyDict] = None) -> Dict[str, Any]:
+        loaded_metadata = getattr(self, "_loaded_metadata", None)
+        train_graphs = getattr(self, "_train_graphs", None)
         for source in (
             getattr(config, "benchmark_molecular_vocab", None) if config is not None else None,
-            (self._loaded_metadata or {}).get("molecular_vocab") if isinstance(self._loaded_metadata, Mapping) else None,
+            (loaded_metadata or {}).get("molecular_vocab") if isinstance(loaded_metadata, Mapping) else None,
         ):
             if source:
                 return _to_plain(source)
-        if self._train_graphs:
-            return self._molecular_vocab(self._train_graphs)
+        if train_graphs:
+            return self._molecular_vocab(train_graphs)
         # Last-resort fallback for old checkpoints without split provenance.
         if self.dataset_name == "qm9":
             n = 5

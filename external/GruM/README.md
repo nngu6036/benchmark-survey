@@ -49,7 +49,7 @@ Create an environment with **Python 3.9.15** and **Pytorch 1.12.1**.
 Use the following command to install the requirements:
 
 ```
-pip install -r requirements.txt
+pip install -r ../../requirements.txt
 conda install pyg -c pyg
 conda install -c conda-forge graph-tool=2.45
 conda install -c conda-forge rdkit=2022.03.2

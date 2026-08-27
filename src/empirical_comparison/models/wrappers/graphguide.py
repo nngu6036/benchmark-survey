@@ -207,6 +207,18 @@ class GraphGUIDEWrapper(BaseGenerator):
         g.remove_edges_from(nx.selfloop_edges(g))
         return nx.convert_node_labels_to_integers(g, ordering="sorted")
 
+    @staticmethod
+    def _graph_for_pyg_conversion(graph: nx.Graph) -> nx.Graph:
+        clean = nx.Graph()
+        clean.add_nodes_from(range(graph.number_of_nodes()))
+        for node, attrs in graph.nodes(data=True):
+            node_attrs: dict[str, Any] = {}
+            if "feats" in attrs:
+                node_attrs["feats"] = np.asarray(attrs["feats"], dtype=np.float32)
+            clean.nodes[int(node)].update(node_attrs)
+        clean.add_edges_from((int(u), int(v)) for u, v in graph.edges())
+        return clean
+
     def _node_feature_array(self, graph: nx.Graph, node: int) -> np.ndarray:
         if self.force_constant_features:
             return np.ones(self.default_node_feature_dim, dtype=np.float32)
@@ -233,7 +245,7 @@ class GraphGUIDEWrapper(BaseGenerator):
                 f"GraphGUIDE requires a fixed node feature dimension per graph; got dimensions {sorted(dims)}."
             )
         nx.set_node_attributes(g, features, "feats")
-        return g
+        return self._graph_for_pyg_conversion(g)
 
     def _infer_input_dim(self, graphs: Iterable[nx.Graph]) -> int:
         for graph in graphs:

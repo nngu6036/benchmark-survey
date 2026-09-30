@@ -395,6 +395,25 @@ PYTHONPATH=src python scripts/aggregate_results.py   --run-ids 0 1 2
 PYTHONPATH=src python scripts/make_latex_tables.py
 ```
 
+### Generate Compute/Complexity Tables
+
+Training and sampling metadata already record measured wall-clock time and peak memory. New runs also record a `generation_complexity` block describing the asymptotic per-sampler-step family cost and configured sampling budget.
+
+```bash
+PYTHONPATH=src python scripts/make_compute_budget_table.py \
+  --datasets planar sbm qm9 zinc \
+  --models construct digress disco edp_gnn graphguide grum \
+  --run-ids 0 1 2 \
+  --output outputs/tables/compute_budget.tex
+
+PYTHONPATH=src python scripts/make_generation_complexity_table.py \
+  --dataset planar \
+  --models construct digress disco edp_gnn graphguide grum \
+  --output outputs/tables/generation_complexity.tex
+```
+
+`make_generation_complexity_table.py` reads `generation_complexity` from run metadata when available and falls back to the registered model-family specification for legacy runs.
+
 ---
 
 ## Why This Project Is Interesting

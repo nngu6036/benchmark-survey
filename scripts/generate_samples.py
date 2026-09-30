@@ -31,6 +31,7 @@ from empirical_comparison.graphs.attributes import apply_empirical_attributes, a
 from empirical_comparison.generation.validity import quality_metrics
 from empirical_comparison.registry import available_datasets, available_models
 from empirical_comparison.utils.compute import PeakMemoryMonitor, compute_report
+from empirical_comparison.utils.complexity import generation_complexity_report
 from empirical_comparison.utils.io import load_yaml, save_json, save_pickle, save_yaml, stable_hash
 from empirical_comparison.utils.logging import get_logger
 from empirical_comparison.utils.numerics import assert_finite_graphs
@@ -290,6 +291,7 @@ def _generate_samples(
         num_graphs=len(graphs),
         memory=memory_monitor.to_dict(),
     )
+    generation_complexity = generation_complexity_report(model_name, cfg, graphs=graphs)
     attr_schema = normalize_schema(cfg)
     attr_postprocess_applied = False
     try:
@@ -356,6 +358,7 @@ def _generate_samples(
         "hardware": compute["hardware_label"],
         "peak_memory_mib": compute.get("peak_memory_mib"),
         "compute": compute,
+        "generation_complexity": generation_complexity,
         "compute_budget": {
             "dataset": dataset,
             "model": model_name,

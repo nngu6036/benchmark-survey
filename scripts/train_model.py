@@ -19,6 +19,7 @@ from empirical_comparison.evaluation.run_utils import (
 from empirical_comparison.graphs.attributes import attribute_coverage, canonicalize_graph_attributes, fit_attribute_statistics, normalize_schema
 from empirical_comparison.registry import get_model_class, available_datasets, available_models
 from empirical_comparison.utils.compute import PeakMemoryMonitor, compute_report
+from empirical_comparison.utils.complexity import generation_complexity_report
 from empirical_comparison.utils.io import load_yaml, save_json, save_yaml, stable_hash
 from empirical_comparison.utils.logging import get_logger
 from empirical_comparison.utils.numerics import assert_model_tensors_finite
@@ -112,6 +113,9 @@ def _train_one_run(
         num_graphs=len(splits.get("train", [])),
         memory=memory_monitor.to_dict(),
     )
+    generation_complexity = generation_complexity_report(
+        model_name, model_cfg, graphs=list(splits.get("train", []))
+    )
 
     run_dir = run_output_dir(dataset, model_name, run_id=run_id if use_run_paths else None)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -127,6 +131,7 @@ def _train_one_run(
         "hardware": compute["hardware_label"],
         "peak_memory_mib": compute.get("peak_memory_mib"),
         "compute": compute,
+        "generation_complexity": generation_complexity,
         "compute_budget": {
             "dataset": dataset,
             "model": model_name,
